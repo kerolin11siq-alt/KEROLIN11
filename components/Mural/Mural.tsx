@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { 
   MessageCircle, 
   Edit2, 
@@ -33,7 +33,7 @@ interface MuralProps {
   posts: MuralPost[];
   userName: string;
   users: User[];
-  onAddPost: (post: Omit<MuralPost, 'id' | 'createdAt' | 'comments'>) => void;
+  onAddPost: (post: Omit<MuralPost, 'id' | 'createdAt' | 'comments'> & { id?: string }) => void;
   onUpdatePost: (post: MuralPost) => void;
   onDeletePost: (postId: string) => void;
   onOpenCase: (caseId: string) => void;
@@ -252,11 +252,24 @@ const Mural: React.FC<MuralProps> = ({
     return calculateAutomaticInsights(currentMonthRecords, posts, tratativas);
   }, [records, posts, tratativas]);
 
+  const [newlyCreatedPostId, setNewlyCreatedPostId] = useState<string | null>(null);
+
+  // Clear newlyCreatedPostId after some time
+  useEffect(() => {
+    if (newlyCreatedPostId) {
+      const timer = setTimeout(() => setNewlyCreatedPostId(null), 10000); // 10 seconds
+      return () => clearTimeout(timer);
+    }
+  }, [newlyCreatedPostId]);
+
   const filteredPosts = useMemo(() => {
     const today = new Date();
     const searchLower = filterSearch.toLowerCase().trim();
     
     return posts.filter(post => {
+      // Always show newly created post even if filters are active
+      if (post.id === newlyCreatedPostId) return true;
+
       // Logical check for removed posts
       if (post.isRemoved) return false;
 
@@ -307,8 +320,12 @@ const Mural: React.FC<MuralProps> = ({
       newPost.criticality === 'Crítico' ||
       newPost.criticality === 'Ação necessária';
 
+    const tempId = crypto.randomUUID();
+    setNewlyCreatedPostId(tempId);
+
     onAddPost({
       ...newPost,
+      id: tempId,
       userId: userName,
       userName: userName,
       tags: newPost.tags,
@@ -467,6 +484,25 @@ const Mural: React.FC<MuralProps> = ({
         </div>
 
         <div className="space-y-4">
+          {newlyCreatedPostId && !posts.some(p => p.id === newlyCreatedPostId && filteredPosts.some(fp => fp.id === p.id)) && (
+            <div className="bg-blue-50 border border-blue-100 p-4 rounded-xl flex items-center justify-between animate-in fade-in slide-in-from-left-4 duration-500">
+              <div className="flex items-center gap-3">
+                <Bot className="w-5 h-5 text-blue-600" />
+                <p className="text-[10px] font-black text-blue-900 uppercase">Aviso: Um post foi criado, mas está oculto pelos filtros aplicados.</p>
+              </div>
+              <button 
+                onClick={() => {
+                  setFilterSearch('');
+                  setFilterCriticality('ALL');
+                  setShowMyMentions(false);
+                }}
+                className="text-[10px] font-black text-blue-600 uppercase hover:underline"
+              >
+                Limpar Filtros
+              </button>
+            </div>
+          )}
+
           {filteredPosts.length > 0 ? (
             filteredPosts.map(post => (
               <MuralCard 
@@ -671,6 +707,20 @@ const MuralCard: React.FC<MuralCardProps> = ({
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isAgirMenuOpen, setIsAgirMenuOpen] = useState(false);
   const [isRelinkModalOpen, setIsRelinkModalOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuPosition, setMenuPosition] = useState<'down' | 'up'>('down');
+
+  useEffect(() => {
+    if (isMenuOpen && menuRef.current) {
+      const rect = menuRef.current.getBoundingClientRect();
+      const viewportHeight = window.innerHeight;
+      if (rect.bottom + 200 > viewportHeight) {
+        setMenuPosition('up');
+      } else {
+        setMenuPosition('down');
+      }
+    }
+  }, [isMenuOpen]);
 
   const alerts = useMemo(() => calculateAutomaticAlerts(records, posts, [], tratativas), [records, posts, tratativas]);
   const aiSuggestion = useMemo(() => calculateMuralAISuggestion(post, records, alerts, posts), [post, records, alerts, posts]);
@@ -808,7 +858,7 @@ const MuralCard: React.FC<MuralCardProps> = ({
       post.criticality === 'Crítico' ? 'border-red-100' : 
       post.criticality === 'Ação necessária' ? 'border-orange-100' :
       'border-slate-100'
-    } overflow-hidden group relative`}>
+    } group relative`}>
       {/* Header do Card — Minimalista Premium */}
       <div className="px-5 py-3 border-b border-slate-50 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -820,6 +870,12 @@ const MuralCard: React.FC<MuralCardProps> = ({
             }`}>
               {post.status || 'Aberto'}
             </span>
+
+            {treatment && (
+              <span className="text-[8px] font-black bg-blue-600 text-white px-2 py-0.5 rounded-lg uppercase tracking-wider animate-in fade-in zoom-in duration-300">
+                Tratativa Vinculada
+              </span>
+            )}
             
             {post.caseId && (
               <button 
@@ -836,7 +892,7 @@ const MuralCard: React.FC<MuralCardProps> = ({
           {post.isPinned && (
             <Pin className="w-3 h-3 text-blue-500 fill-current" />
           )}
-          <div className="relative">
+          <div className="relative" ref={menuRef}>
             <button 
               onClick={() => setIsMenuOpen(!isMenuOpen)}
               className="p-1.5 hover:bg-slate-100 text-slate-400 hover:text-slate-600 rounded-lg transition-colors"
@@ -845,7 +901,10 @@ const MuralCard: React.FC<MuralCardProps> = ({
             </button>
             
             {isMenuOpen && (
-              <div className="absolute right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-20 w-40 overflow-hidden animate-in fade-in slide-in-from-top-2">
+              <div className={`absolute right-0 ${menuPosition === 'down' ? 'top-full mt-1' : 'bottom-full mb-1'} bg-white border border-slate-200 rounded-xl shadow-xl z-[150] w-48 overflow-hidden animate-in fade-in slide-in-from-${menuPosition === 'down' ? 'top' : 'bottom'}-2`}>
+                <div className="bg-slate-50 px-4 py-2 border-b border-slate-100">
+                  <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Opções do Registro</p>
+                </div>
                 <button 
                   onClick={() => setIsMenuOpen(false)}
                   className="w-full px-4 py-2 text-left text-[10px] font-black uppercase text-slate-600 hover:bg-slate-50 flex items-center gap-2"
@@ -976,6 +1035,35 @@ const MuralCard: React.FC<MuralCardProps> = ({
             </div>
           )}
         </div>
+
+        <div className="mt-3">
+          <div className="text-[11px] text-slate-600 font-medium leading-relaxed whitespace-pre-wrap">
+            {highlightedDescription}
+          </div>
+        </div>
+
+        {treatment && (
+          <div className="mt-3 p-3 bg-blue-50/50 border border-blue-100 rounded-xl space-y-2 animate-in fade-in slide-in-from-top-1 duration-300">
+            <div className="flex items-center justify-between">
+               <span className="text-[9px] font-black text-blue-800 uppercase tracking-widest flex items-center gap-1">
+                 <ClipboardList className="w-3 h-3" /> Contexto da Tratativa
+               </span>
+               <span className={`text-[8px] font-black px-1.5 py-0.5 rounded uppercase ${treatmentStatusColors[treatment.status]}`}>
+                 {treatment.status}
+               </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[9px]">
+              <div>
+                <p className="text-slate-400 font-bold uppercase tracking-tighter">Responsável</p>
+                <p className="font-black text-slate-800 uppercase line-clamp-1">{treatment.responsible}</p>
+              </div>
+              <div>
+                <p className="text-slate-400 font-bold uppercase tracking-tighter">Prazo</p>
+                <p className="font-black text-slate-800">{treatment.deadline ? format(parseISO(treatment.deadline), 'dd/MM/yy') : '-'}</p>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="mt-4 flex items-center justify-between">
           <div className="flex items-center gap-2">

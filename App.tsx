@@ -701,11 +701,11 @@ const App: React.FC = () => {
     }
 
     const newPost: MuralPost = {
+      id: (postData as any).id || crypto.randomUUID(),
       ...postData,
       userName: standardizeName(postData.userName),
       criticality: finalCriticality,
       type: finalCriticality as MuralPostType,
-      id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
       comments: []
     };
@@ -801,6 +801,61 @@ const App: React.FC = () => {
     await setDoc(doc(db, 'treatments', standardizedTreatment.id), cleanData(standardizedTreatment));
     syncUser(standardizedTreatment.responsible);
     syncUser(standardizedTreatment.usuario_criador);
+
+    // AI Studio Sync: Automatic Mural Post implementation
+    const caseId = standardizedTreatment.case_numero;
+    if (caseId) {
+      const caseRecord = baseAnalitica.find(r => r.caseId === caseId);
+      const existingPost = muralPosts.find(p => p.caseId === caseId && !p.isRemoved && !p.isArchived);
+      
+      const postTitle = `[TRATATIVA] ${standardizedTreatment.title}`;
+      const postDescription = `
+**Escopo da Tratativa:**
+${standardizedTreatment.description}
+
+**Detalhes Operacionais:**
+- Responsável: ${standardizedTreatment.responsible}
+- Prioridade: ${standardizedTreatment.priority}
+- Status Atual: ${standardizedTreatment.status}
+${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` : ''}
+- Criado por: ${standardizedTreatment.usuario_criador} em ${new Date(standardizedTreatment.criado_em).toLocaleString('pt-BR')}
+      `.trim();
+
+      if (existingPost) {
+        // Update existing post to link the treatment and update context
+        const updatedPost: MuralPost = {
+          ...existingPost,
+          title: postTitle,
+          description: postDescription,
+          status: 'Em acompanhamento',
+          treatment: standardizedTreatment,
+          criticality: standardizedTreatment.priority,
+          type: standardizedTreatment.priority as any
+        };
+        await setDoc(doc(db, 'muralPosts', updatedPost.id), cleanData(updatedPost));
+      } else {
+        // Create new post
+        const newPostId = crypto.randomUUID();
+        const newPost: MuralPost = {
+          id: newPostId,
+          userId: standardizedTreatment.usuario_criador,
+          userName: standardizedTreatment.usuario_criador,
+          createdAt: new Date().toISOString(),
+          type: standardizedTreatment.priority as any,
+          title: postTitle,
+          description: postDescription,
+          subject: caseRecord?.subject || standardizedTreatment.subject || 'Tratativa Operacional',
+          criticality: standardizedTreatment.priority,
+          status: 'Em acompanhamento',
+          tags: ['Tratativa', 'Auto-Sync'],
+          mentions: [standardizedTreatment.responsible],
+          caseId: caseId,
+          comments: [],
+          treatment: standardizedTreatment
+        };
+        await setDoc(doc(db, 'muralPosts', newPost.id), cleanData(newPost));
+      }
+    }
   };
 
   const handleUpdateTreatment = async (updatedTreatment: MuralTreatment) => {
@@ -812,6 +867,35 @@ const App: React.FC = () => {
     await setDoc(doc(db, 'treatments', standardizedTreatment.id), cleanData(standardizedTreatment));
     syncUser(standardizedTreatment.responsible);
     syncUser(standardizedTreatment.usuario_criador);
+
+    // Sync updates to corresponding Mural Post
+    const caseId = standardizedTreatment.case_numero;
+    if (caseId) {
+      const existingPost = muralPosts.find(p => p.caseId === caseId && !p.isRemoved && !p.isArchived);
+      if (existingPost) {
+        const postDescription = `
+**Escopo da Tratativa:**
+${standardizedTreatment.description}
+
+**Detalhes Operacionais:**
+- Responsável: ${standardizedTreatment.responsible}
+- Prioridade: ${standardizedTreatment.priority}
+- Status Atual: ${standardizedTreatment.status}
+${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` : ''}
+- Criado por: ${standardizedTreatment.usuario_criador} em ${new Date(standardizedTreatment.criado_em).toLocaleString('pt-BR')}
+- Última Atualização: ${new Date().toLocaleString('pt-BR')}
+        `.trim();
+
+        const updatedPost: MuralPost = {
+          ...existingPost,
+          description: postDescription,
+          treatment: standardizedTreatment,
+          criticality: standardizedTreatment.priority,
+          type: standardizedTreatment.priority as any
+        };
+        await setDoc(doc(db, 'muralPosts', updatedPost.id), cleanData(updatedPost));
+      }
+    }
   };
 
   const handleDeleteTreatment = async (treatmentId: string) => {

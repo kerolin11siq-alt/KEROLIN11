@@ -260,8 +260,10 @@ const DataTable: React.FC<DataTableProps> = ({
                                 <button 
                                   onClick={() => onAddTreatment?.({
                                     id: crypto.randomUUID(),
+                                    case_numero: r.caseId,
                                     title: `Tratativa Case ${r.caseId}`,
-                                    description: `Tratativa iniciada para o case ${r.caseId} (${r.status})`,
+                                    description: `Tratativa iniciada para o case ${r.caseId} (${r.status}). \n\nEscopo: ${r.description}`,
+                                    subject: r.subject || 'Tratativa de Case',
                                     responsible: currentUserName || '',
                                     priority: 'Ação necessária',
                                     deadline: new Date(Date.now() + 86400000 * 7).toISOString().split('T')[0],
