@@ -25,10 +25,7 @@ const ImportModal: React.FC<ImportModalProps> = ({ onImport, onClose }) => {
       .replace(/[^a-zA-Z0-9\s]/g, ' ')
       .toUpperCase()
       .trim()
-      .replace(/\s+/g, ' ')
-      .split(' ')
-      .filter(word => !['DE', 'DA', 'DO', 'DAS', 'DOS'].includes(word))
-      .join(' ');
+      .replace(/\s+/g, ' ');
   };
 
   const headerMap: Record<string, keyof TicketRecord> = {
@@ -37,10 +34,10 @@ const ImportModal: React.FC<ImportModalProps> = ({ onImport, onClose }) => {
     'CASE ANTE': 'previousCaseId', 'CASE ANTERIOR': 'previousCaseId', 'VINCULO': 'previousCaseId', 'REINCIDENCIA': 'previousCaseId',
     'DATA ABERTURA': 'openingDate', 'ABERTURA': 'openingDate', 'DATA ABE': 'openingDate', 'DATA': 'openingDate', 'DATA ORIGEM': 'openingDate', 'DATA_ABERTURA': 'openingDate',
     'DATA RETORNO': 'returnDate', 'RETORNO': 'returnDate', 'DATA DEVOLUCAO': 'returnDate', 'DEVOLUCAO': 'returnDate', 'DATA RESPOSTA': 'returnDate', 'DATA_RETORNO': 'returnDate',
-    'USUARIO': 'externalUser', 'CLIENTE': 'externalUser', 'SOLICITANTE': 'externalUser', 'FSJ': 'externalUser', 'NOME SOLICITANTE': 'externalUser',
+    'USUARIO': 'externalUser', 'USURIO': 'externalUser', 'USU RIO': 'externalUser', 'SOLICITANTE': 'externalUser', 'FSJ': 'externalUser',
     'ANALISTA': 'user', 'RESPONSAVEL': 'user', 'ATENDENTE': 'user', 'TECNICO': 'user', 'ANALISTA SOVOS': 'user',
-    'DESCRICAO ERRO REGRA': 'description', 'ERRO REGRA': 'description', 'DESCRICAO': 'description', 'DETALHES': 'description', 'ERRO': 'description',
-    'CENARIOS': 'scenarios', 'TESTES': 'scenarios', 'CENARIO': 'scenarios', 'CENARIOS TESTE': 'scenarios',
+    'DESCRICAO ERRO REGRA': 'description', 'DESCRIO ERRO REGRA': 'description', 'ERRO REGRA': 'description', 'DESCRICAO': 'description', 'DETALHES': 'description', 'ERRO': 'description',
+    'CENARIOS': 'scenarios', 'CENRIOS': 'scenarios', 'TESTES': 'scenarios', 'CENARIO': 'scenarios', 'CENARIOS TESTE': 'scenarios',
     'OBS': 'observations', 'OBSERVACOES': 'observations', 'NOTAS': 'observations', 'COMENTARIOS': 'observations',
     'STATUS': 'status', 'SITUACAO': 'status', 'ESTADO': 'status',
     'ASSUNTO': 'subject', 'TITULO': 'subject', 'RESUMO': 'subject'
@@ -68,13 +65,24 @@ const ImportModal: React.FC<ImportModalProps> = ({ onImport, onClose }) => {
   };
 
   const mapStatus = (status: string): TicketStatus => {
-    const s = normalizeHeader(status || '');
-    if (s.includes('CONCLU') || s.includes('FECHAD') || s.includes('RESOLV') || s.includes('FINALIZ')) return 'CONCLUIDO';
-    if (s.includes('DEVOLV') || s.includes('PENDENT') || s.includes('AGUARD') || s.includes('RETORNO')) return 'DEVOLVIDO';
-    return 'ABERTO';
+    const raw = (status || '').toUpperCase().trim()
+      .replace(/[\u0000-\u001F\u007F-\u009F\uFFFD]/g, "")
+      .replace(/\s+/g, ' ');
+      
+    if (!raw) return 'NÃO INFORMADO';
+    
+    // Normalização agressiva para CONCLUÍDO (lidando com encoding quebrado)
+    if (raw.includes('CONCLU') && (raw.includes('DO') || raw.includes('IDO'))) return 'CONCLUÍDO';
+    if (raw === 'CONCLUIDO') return 'CONCLUÍDO';
+    
+    if (raw === 'DEVOLVIDO') return 'DEVOLVIDO';
+    if (raw === 'ABERTO') return 'ABERTO';
+    
+    return raw as TicketStatus;
   };
 
   const parseCSVData = (text: string, delimiter: string) => {
+    // Basic CSV parser that handles quoted values
     const rows: string[][] = [];
     let currentRow: string[] = [];
     let currentField = '';
@@ -116,7 +124,20 @@ const ImportModal: React.FC<ImportModalProps> = ({ onImport, onClose }) => {
     setError(null);
 
     try {
-      const text = await file.text();
+      // Usar ArrayBuffer e TextDecoder para lidar com encoding Windows-1252 (comum em CSVs do Excel no Brasil)
+      const buffer = await file.arrayBuffer();
+      
+      // Tentativa de detectar se é UTF-8 ou Windows-1252
+      let text = '';
+      try {
+        const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+        text = utf8Decoder.decode(buffer);
+      } catch (e) {
+        // Se falhar UTF-8, usamos Windows-1252 que preserva acentos do Excel brasileiro
+        const latinDecoder = new TextDecoder('windows-1252');
+        text = latinDecoder.decode(buffer);
+      }
+
       const cleanText = text.replace(/^\uFEFF/, '').trim();
       if (!cleanText) throw new Error('O arquivo está vazio.');
 
@@ -183,7 +204,7 @@ const ImportModal: React.FC<ImportModalProps> = ({ onImport, onClose }) => {
           returnDate: retDate,
           conclusionDate: retDate,
           user: rowData.user || 'Analista Sovos',
-          externalUser: rowData.externalUser || 'FSJ (Solicitante)',
+          externalUser: rowData.externalUser || '',
           description: rowData.description || '',
           scenarios: rowData.scenarios || '',
           observations: (rowData.observations || '') + (unmappedData.length > 0 ? `\n\n[DADOS EXTRAS DA PLANILHA]:\n${unmappedData.join('\n')}` : ''),
@@ -231,7 +252,7 @@ const ImportModal: React.FC<ImportModalProps> = ({ onImport, onClose }) => {
                 <p className="text-sm font-black text-gray-950 uppercase">Selecionar Planilha CSV</p>
                 <div className="mt-4 space-y-1">
                    <p className="text-[10px] text-emerald-800 font-black uppercase">✔ Fidelidade de Datas Ativa</p>
-                   <p className="text-[10px] text-gray-700 font-bold italic">Mapeamento: Analista = Sovos | Solicitante = FSJ</p>
+                   <p className="text-[10px] text-gray-700 font-bold italic">Base: Coluna "USUÁRIO" (Solicitante FSJ)</p>
                 </div>
               </div>
             )}

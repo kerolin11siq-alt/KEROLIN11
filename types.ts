@@ -1,11 +1,12 @@
 
-export type TicketStatus = 'ABERTO' | 'DEVOLVIDO' | 'CONCLUIDO';
+export type TicketStatus = 'ABERTO' | 'EM ANDAMENTO' | 'EM ANALISE' | 'AGUARDANDO' | 'DEVOLVER SOVOS' | 'CONCLUÍDO' | 'DEVOLVIDO' | 'NÃO INFORMADO';
 export type TicketType = 'PRODUÇÃO' | 'PROJETO';
 export type SLALevel = 'NO PRAZO' | 'ALERTA' | 'CRÍTICO';
 
 export interface User {
   id: string;
   name: string;
+  photoURL?: string;
 }
 
 export interface TicketRecord {
@@ -182,6 +183,12 @@ export interface MuralPost {
   caseId?: string; // Número do case vinculado
   isHighlighted?: boolean;
   isPinned?: boolean;
+  isArchived?: boolean;
+  isRemoved?: boolean;
+  removedAt?: string;
+  removedBy?: string;
+  reincidencePostId?: string;
+  reincidenceCaseId?: string;
   comments: MuralComment[];
   treatment?: MuralTreatment;
   aiSuggestion?: MuralAISuggestion;

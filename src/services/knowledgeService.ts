@@ -14,7 +14,7 @@ export const learnFromCase = async (record: TicketRecord): Promise<CaseKnowledge
   // Only learn from resolved/concluded cases as per requirement
   // status = resolvido, status = concluído
   // cases sem solução clara não devem gerar conhecimento
-  const isResolved = record.status === 'CONCLUIDO';
+  const isResolved = record.status === 'CONCLUÍDO';
   const hasContent = record.observations && record.observations.trim().length > 30;
   
   if (!isResolved || !hasContent) {

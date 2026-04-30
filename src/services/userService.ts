@@ -1,7 +1,7 @@
 
 import { User } from '../../types';
 
-export const USERS_LIST_KEY = 'fsj_usuarios';
+export const USERS_LIST_KEY = 'fsj_users';
 
 /**
  * Normaliza um nome de usuário seguindo as regras:

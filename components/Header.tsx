@@ -1,7 +1,8 @@
 
 import React, { useState } from 'react';
 import { ViewType, MuralNotification } from '../types';
-import { LayoutDashboard, Table as TableIcon, Database, ShieldCheck, MessageSquare, BarChart3, Bell, X, Check, Search } from 'lucide-react';
+import { LayoutDashboard, Table as TableIcon, Database, ShieldCheck, MessageSquare, BarChart3, Bell, X, Check, Search, LogIn, LogOut, User as UserIcon } from 'lucide-react';
+import { User as FirebaseUser } from 'firebase/auth';
 
 interface HeaderProps {
   activeTab: ViewType;
@@ -12,6 +13,9 @@ interface HeaderProps {
   notifications?: MuralNotification[];
   onNotificationClick?: (notification: MuralNotification) => void;
   onClearNotifications?: () => void;
+  currentUser: FirebaseUser | null;
+  onLogin: (type: 'google' | 'anonymous') => void;
+  onLogout: () => void;
 }
 
 const Header: React.FC<HeaderProps> = ({ 
@@ -22,9 +26,13 @@ const Header: React.FC<HeaderProps> = ({
   onEditUser,
   notifications = [],
   onNotificationClick,
-  onClearNotifications
+  onClearNotifications,
+  currentUser,
+  onLogin,
+  onLogout
 }) => {
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [isLoginMenuOpen, setIsLoginMenuOpen] = useState(false);
   
   const unreadCount = notifications.filter(n => !n.read && (n.userId === userName || n.userId.toLowerCase() === 'todos')).length;
   const myNotifications = notifications.filter(n => n.userId === userName || n.userId.toLowerCase() === 'todos');
@@ -163,20 +171,69 @@ const Header: React.FC<HeaderProps> = ({
              )}
            </div>
 
-           {userName && (
-             <button 
-               onClick={onEditUser}
-               className="flex flex-col items-end group cursor-pointer"
-             >
-               <p className="text-[8px] font-black text-blue-200 uppercase leading-none mb-1 group-hover:text-white transition-colors">Usuário Ativo</p>
-               <p className="text-[11px] font-black text-white uppercase tracking-tight group-hover:underline decoration-blue-300 underline-offset-4">{userName}</p>
-             </button>
+           {currentUser ? (
+              <div className="flex items-center gap-4">
+                <div className="flex flex-col items-end">
+                   <p className="text-[8px] font-black text-blue-200 uppercase leading-none mb-1">
+                     {currentUser.isAnonymous ? 'Conectado como Convidado' : 'Conectado'}
+                   </p>
+                   <p className="text-[11px] font-black text-white uppercase tracking-tight">{userName || currentUser.displayName || 'Usuário'}</p>
+                </div>
+                {currentUser.photoURL ? (
+                  <img src={currentUser.photoURL} alt="User" className="w-8 h-8 rounded-full border-2 border-white/20" />
+                ) : (
+                  <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-white border-2 border-white/20">
+                    <UserIcon className="w-4 h-4" />
+                  </div>
+                )}
+                <button 
+                  onClick={onLogout}
+                  className="p-2 text-white/60 hover:text-white transition-colors"
+                  title="Sair"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
+           ) : (
+             <div className="relative">
+               <button 
+                  onClick={() => setIsLoginMenuOpen(!isLoginMenuOpen)}
+                  className="flex items-center gap-2 px-4 py-2 bg-white text-[#003DA5] rounded-xl text-[10px] font-black uppercase tracking-widest shadow-xl hover:bg-blue-50 transition-all active:scale-95"
+               >
+                  <LogIn className="w-4 h-4" />
+                  Conectar
+               </button>
+
+               {isLoginMenuOpen && (
+                 <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-2xl border border-gray-100 overflow-hidden z-50">
+                    <button 
+                      onClick={() => { onLogin('google'); setIsLoginMenuOpen(false); }}
+                      className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-3 border-b border-gray-50 transition-colors"
+                    >
+                      <div className="w-6 h-6 bg-red-50 rounded-lg flex items-center justify-center">
+                        <Database className="w-3 h-3 text-red-500" />
+                      </div>
+                      <span className="text-[10px] font-black uppercase text-gray-700 tracking-wider">Conta Google</span>
+                    </button>
+                    <button 
+                      onClick={() => { onLogin('anonymous'); setIsLoginMenuOpen(false); }}
+                      className="w-full text-left px-4 py-3 hover:bg-gray-50 flex items-center gap-3 transition-colors"
+                    >
+                      <div className="w-6 h-6 bg-blue-50 rounded-lg flex items-center justify-center">
+                        <UserIcon className="w-3 h-3 text-blue-500" />
+                      </div>
+                      <span className="text-[10px] font-black uppercase text-gray-700 tracking-wider">Como Convidado</span>
+                    </button>
+                 </div>
+               )}
+             </div>
            )}
+
            <div className="hidden lg:block text-right">
-              <p className="text-[8px] font-black text-blue-200 uppercase leading-none mb-1">Status Operacional</p>
+              <p className="text-[8px] font-black text-blue-200 uppercase leading-none mb-1">Status</p>
               <div className="flex items-center gap-2 justify-end">
                  <span className={`text-[10px] font-black ${dbStatus === 'ONLINE' ? 'text-emerald-400' : 'text-red-400'}`}>
-                   {dbStatus === 'ONLINE' ? 'SISTEMA ONLINE' : 'DATABASE OFFLINE'}
+                   {dbStatus === 'ONLINE' ? 'CLOUDSYNC ON' : 'OFFLINE'}
                  </span>
                  <Database className={`w-3.5 h-3.5 ${dbStatus === 'ONLINE' ? 'text-emerald-400' : 'text-red-400'}`} />
               </div>

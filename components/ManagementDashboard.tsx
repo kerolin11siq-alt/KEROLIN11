@@ -15,14 +15,17 @@ import {
   Tag,
   ShieldCheck,
   Bot,
-  Plus
+  Plus,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { 
   TicketRecord, 
   MuralPost, 
   WeeklyRankingItem, 
   AutomaticAlert, 
-  MuralTreatment
+  MuralTreatment,
+  TicketStatus
 } from '../types';
 import { 
   calculateRanking, 
@@ -31,17 +34,42 @@ import {
   generateExecutiveInsight,
   calculateThemeTrends,
   ThemeTrend,
-  calculateAutomaticInsights
+  calculateAutomaticInsights,
+  calculateGrowthTrend
 } from '../src/services/analyticsService';
-import { format, parseISO, isSameDay, isAfter, subDays, startOfDay, startOfMonth } from 'date-fns';
+import { format, parseISO, isSameDay, isAfter, subDays, startOfDay, startOfMonth, isValid, parse, differenceInDays } from 'date-fns';
+
+const robustParse = (dateStr: string | undefined): Date => {
+  if (!dateStr || dateStr === '-' || dateStr.trim() === '') return new Date(0);
+  const iso = parseISO(dateStr);
+  if (isValid(iso)) return iso;
+  
+  const patterns = ['dd/MM/yyyy', 'dd-MM-yyyy', 'dd/MM/yy', 'dd-MM-yy'];
+  for (const p of patterns) {
+    const parsed = parse(dateStr, p, new Date());
+    if (isValid(parsed)) return parsed;
+  }
+  return new Date(0);
+};
+
+export interface NavigationContext {
+  startDate?: string;
+  endDate?: string;
+  status?: string;
+  type?: string;
+  isFormalRecurrent?: boolean;
+}
 
 interface ManagementDashboardProps {
   records: TicketRecord[];
   posts: MuralPost[];
   tratativas: MuralTreatment[];
-  onViewSubject: (subject: string) => void;
+  userName: string;
+  onViewSubject: (subject: string, context?: NavigationContext) => void;
   onViewTreatment: (treatment: MuralTreatment) => void;
-  onOpenCase: (caseId: string) => void;
+  onViewCarga?: (userName: string, type: 'total' | 'waiting' | 'stale') => void;
+  onViewMural?: (filters: { search?: string, mentions?: boolean, criticality?: string }) => void;
+  onOpenCase: (caseId: string, context?: NavigationContext) => void;
   onAddTreatment: (treatment: MuralTreatment) => void;
 }
 
@@ -49,724 +77,743 @@ const ManagementDashboard: React.FC<ManagementDashboardProps> = ({
   records, 
   posts,
   tratativas,
+  userName,
   onViewSubject,
   onViewTreatment,
+  onViewCarga,
+  onViewMural,
   onOpenCase,
   onAddTreatment
 }) => {
-  // Filtros
-  const [viewMode, setViewMode] = useState<'operacional' | 'executivo'>('operacional');
+  // Estado das seções colapsáveis - Todas iniciam FECHADAS
+  const [openSections, setOpenSections] = useState<Record<string, boolean>>({
+    status: false,
+    responsibles: false,
+    operational: false,
+    themes: false,
+    insights: false
+  });
+
+  const toggleSection = (section: string) => {
+    setOpenSections(prev => ({
+      ...prev,
+      [section]: !prev[section]
+    }));
+  };
 
   const [filters, setFilters] = useState({
-    period: '7d', // 7d, 15d, 30d, month, comparison
-    responsible: 'all',
-    priority: 'all',
-    status: 'all',
-    subject: '',
-    onlyCritical: false,
-    onlyDelayed: false,
-    onlyFormalRecurrent: false
+    period: '30d',
+    subject: ''
   });
+
+  const [includeOldActiveCases, setIncludeOldActiveCases] = useState(false);
 
   // Lógica de períodos
   const getPeriodDates = (period: string) => {
     const now = new Date();
-    const today = startOfDay(now);
-    let start;
-    let prevStart;
-    let prevEnd;
-
-    switch (period) {
-      case '7d':
-        start = startOfDay(subDays(now, 7));
-        prevStart = startOfDay(subDays(start, 7));
-        prevEnd = start;
-        break;
-      case '15d':
-        start = startOfDay(subDays(now, 15));
-        prevStart = startOfDay(subDays(start, 15));
-        prevEnd = start;
-        break;
-      case '30d':
-        start = startOfDay(subDays(now, 30));
-        prevStart = startOfDay(subDays(start, 30));
-        prevEnd = start;
-        break;
-      case 'month':
-      case 'comparison':
-        start = startOfMonth(now);
-        prevStart = startOfMonth(subDays(start, 1));
-        prevEnd = start;
-        break;
-      default:
-        start = startOfDay(subDays(now, 7));
-        prevStart = startOfDay(subDays(start, 7));
-        prevEnd = start;
+    if (period === 'all') {
+      return { start: new Date(0), today: now };
     }
-    return { start, today, prevStart, prevEnd };
+    
+    const days = parseInt(period.replace('d', '')) || 30;
+    const periodStart = subDays(now, days);
+    return { start: startOfDay(periodStart), today: now };
   };
 
-  const { start: periodStart, today, prevStart, prevEnd } = useMemo(() => getPeriodDates(filters.period), [filters.period]);
+  const { start: periodStart, today } = useMemo(() => getPeriodDates(filters.period), [filters.period]);
 
-  // Filtragem de dados (Período Atual)
+  // Base Analítica Filtrada
   const filteredRecords = useMemo(() => {
+    const activeStatusesForInclusion: TicketStatus[] = ['ABERTO', 'DEVOLVIDO'];
     return records.filter(r => {
-      const date = parseISO(r.openingDate);
-      if (!(isAfter(date, periodStart) || isSameDay(date, periodStart))) return false;
-      
+      const date = robustParse(r.openingDate);
+      const passedDateFilter = filters.period === 'all' ? true : (isAfter(date, periodStart) || isSameDay(date, periodStart));
+      const isOldActive = includeOldActiveCases && activeStatusesForInclusion.includes(r.status);
+
       if (filters.subject && r.normalizedCategory !== filters.subject) return false;
-      if (filters.onlyCritical && r.criticalityScore < 3) return false;
-      if (filters.onlyFormalRecurrent && !r.isFormalRecurrent) return false;
       
-      return true;
+      return passedDateFilter || isOldActive;
     });
-  }, [records, periodStart, filters.subject, filters.onlyCritical, filters.onlyFormalRecurrent]);
+  }, [records, periodStart, filters.subject, includeOldActiveCases, filters.period]);
 
-  // Filtragem de dados (Período Anterior para Comparação)
-  const prevPeriodRecords = useMemo(() => {
-    return records.filter(r => {
-      const date = parseISO(r.openingDate);
-      return (isAfter(date, prevStart) || isSameDay(date, prevStart)) && isAfter(prevEnd, date);
+  // Auxiliar para identificar retrabalho dinamicamente
+  const getReturnInfo = (r: TicketRecord) => {
+    const obs = (r.observations || '').toLowerCase();
+    const keywords = ['devolvido', 'reaberto', 'reabertura', 'retorno incorreto', 'devolução'];
+    let count = 0;
+    
+    keywords.forEach(kw => {
+      const regex = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+      const matches = obs.match(regex);
+      if (matches) count += matches.length;
     });
-  }, [records, prevStart, prevEnd]);
 
-  const filteredPosts = useMemo(() => {
-    return posts.filter(p => {
-      const associatedCase = records.find(r => r.caseId === p.caseId);
-      if (associatedCase) {
-        const date = parseISO(associatedCase.openingDate);
-        if (!(isAfter(date, periodStart) || isSameDay(date, periodStart))) return false;
-      }
-      
-      if (filters.subject && p.subject !== filters.subject) return false;
-      if (filters.onlyCritical && p.criticality !== 'Crítico') return false;
-      
-      return true;
-    });
-  }, [posts, records, periodStart, filters.subject, filters.onlyCritical]);
-
-  const filteredTreatments = useMemo(() => {
-    return tratativas.filter(t => {
-      const date = parseISO(t.criado_em);
-      if (!(isAfter(date, periodStart) || isSameDay(date, periodStart))) return false;
-      
-      if (filters.responsible !== 'all' && t.responsible !== filters.responsible) return false;
-      if (filters.priority !== 'all' && t.priority !== filters.priority) return false;
-      if (filters.status !== 'all' && t.status !== filters.status) return false;
-      if (filters.subject && t.subject !== filters.subject) return false;
-      
-      if (filters.onlyDelayed && (!t.deadline || new Date(t.deadline) >= new Date() || t.status === 'Concluída')) return false;
-      if (filters.onlyCritical && t.priority !== 'Crítico') return false;
-      
-      return true;
-    });
-  }, [tratativas, periodStart, filters.responsible, filters.priority, filters.status, filters.subject, filters.onlyDelayed, filters.onlyCritical]);
-
-  // Cálculos baseados nos filtros
-  const ranking = useMemo(() => calculateRanking(filteredRecords), [filteredRecords]);
-  const themeTrends = useMemo(() => calculateThemeTrends(filteredRecords, prevPeriodRecords), [filteredRecords, prevPeriodRecords]);
-  const alerts = useMemo(() => calculateAutomaticAlerts(filteredRecords, filteredPosts, prevPeriodRecords, filteredTreatments), [filteredRecords, filteredPosts, prevPeriodRecords, filteredTreatments]);
-  const operational = useMemo(() => calculateOperationalDashboard(filteredTreatments, filteredRecords, filteredPosts), [filteredTreatments, filteredRecords, filteredPosts]);
-  const automaticInsights = useMemo(() => calculateAutomaticInsights(filteredRecords, filteredPosts, filteredTreatments), [filteredRecords, filteredPosts, filteredTreatments]);
-  const insight = useMemo(() => generateExecutiveInsight(ranking, alerts, filteredPosts, filteredRecords, filteredTreatments), [ranking, alerts, filteredPosts, filteredRecords, filteredTreatments]);
-
-  // KPIs para comparação
-  const kpis = useMemo(() => {
-    const currentCount = filteredRecords.length;
-    const prevCount = prevPeriodRecords.length;
-    const countTrend = prevCount > 0 ? Math.round(((currentCount - prevCount) / prevCount) * 100) : 0;
-
-    const currentFormal = filteredRecords.filter(r => r.isFormalRecurrent).length;
-    const prevFormal = prevPeriodRecords.filter(r => r.isFormalRecurrent).length;
-    const formalTrend = prevFormal > 0 ? Math.round(((currentFormal - prevFormal) / prevFormal) * 100) : 0;
-
-    const currentRecurrent = filteredRecords.filter(r => r.isRecurrent).length;
-    const prevRecurrent = prevPeriodRecords.filter(r => r.isRecurrent).length;
-    const recurrentTrend = prevRecurrent > 0 ? Math.round(((currentRecurrent - prevRecurrent) / prevRecurrent) * 100) : 0;
+    const statusIsDevolvido = r.status.toUpperCase() === 'DEVOLVIDO';
+    const finalCount = count + (statusIsDevolvido && count === 0 ? 1 : 0);
 
     return {
-      cases: { value: currentCount, trend: countTrend },
-      formal: { value: currentFormal, trend: formalTrend },
-      recurrent: { value: currentRecurrent, trend: recurrentTrend },
-      alerts: { value: alerts.length },
-      delayed: { value: operational.delayedCount }
+      wasReturned: finalCount > 0,
+      count: finalCount
     };
-  }, [filteredRecords, prevPeriodRecords, alerts, operational]);
-
-  const responsibles = useMemo(() => {
-    const set = new Set<string>();
-    tratativas.forEach(t => {
-      if (t.responsible) set.add(t.responsible);
-    });
-    posts.forEach(p => {
-      if (p.treatment?.responsible) set.add(p.treatment.responsible);
-    });
-    return Array.from(set).sort();
-  }, [posts, tratativas]);
-
-  const subjects = useMemo(() => {
-    const set = new Set<string>();
-    records.forEach(r => {
-      if (r.normalizedCategory) set.add(r.normalizedCategory);
-    });
-    return Array.from(set).sort();
-  }, [records]);
-
-  return (
-    <div className="space-y-6 pb-12">
-      {/* HEADER & FILTROS */}
-      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-          <div>
-            <h1 className="text-2xl font-black text-slate-800 tracking-tight">Painel de Gestão</h1>
-            <p className="text-slate-500 text-sm">Foco em decisão e acompanhamento operacional</p>
-          </div>
-          
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex bg-slate-100 p-1 rounded-xl mr-2">
-              <button
-                onClick={() => setViewMode('operacional')}
-                className={`px-4 py-1.5 text-[10px] font-black rounded-lg transition-all ${viewMode === 'operacional' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-700'}`}
-              >
-                OPERACIONAL
-              </button>
-              <button
-                onClick={() => setViewMode('executivo')}
-                className={`px-4 py-1.5 text-[10px] font-black rounded-lg transition-all ${viewMode === 'executivo' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-700'}`}
-              >
-                EXECUTIVO
-              </button>
-            </div>
-
-            <div className="flex bg-slate-100 p-1 rounded-xl">
-              {[
-                { id: '7d', label: '7D' },
-                { id: '15d', label: '15D' },
-                { id: '30d', label: '30D' },
-                { id: 'month', label: 'Mês' }
-              ].map(p => (
-                <button
-                  key={p.id}
-                  onClick={() => setFilters(prev => ({ ...prev, period: p.id }))}
-                  className={`px-3 py-1.5 text-[10px] font-black rounded-lg transition-all ${filters.period === p.id ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="h-6 w-px bg-slate-200 mx-1"></div>
-
-            <select 
-              className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-[11px] font-bold outline-none focus:ring-2 focus:ring-indigo-500"
-              value={filters.responsible}
-              onChange={e => setFilters(prev => ({ ...prev, responsible: e.target.value }))}
-            >
-              <option value="all">Filtro: Responsável</option>
-              {responsibles.map(r => <option key={r} value={r}>{r}</option>)}
-            </select>
-          </div>
-        </div>
-      </div>
-
-      {viewMode === 'executivo' ? (
-        <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-          {/* 1. SITUAÇÃO CRÍTICA */}
-          <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8">
-            <div className="flex items-center gap-3 mb-8">
-              <div className="w-10 h-10 rounded-2xl bg-red-50 flex items-center justify-center">
-                <AlertCircle className="w-6 h-6 text-red-600" />
-              </div>
-              <h2 className="text-[17px] font-black text-slate-800 tracking-tight uppercase">Situação Crítica</h2>
-            </div>
-            
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {alerts.slice(0, 3).map((alert, idx) => (
-                <div key={idx} className="p-6 rounded-[32px] bg-slate-50 border border-slate-100 relative overflow-hidden group hover:border-red-200 transition-all">
-                  <div className="absolute top-0 left-0 w-1.5 h-full bg-red-500"></div>
-                  <p className="text-[11px] font-black text-red-600 uppercase tracking-widest mb-2">{alert.type}</p>
-                  <h3 className="text-[16px] font-black text-slate-800 mb-3 leading-tight">{alert.title}</h3>
-                  <p className="text-[14px] text-slate-500 leading-relaxed font-medium">{alert.message}</p>
-                </div>
-              ))}
-              {alerts.length === 0 && (
-                <div className="col-span-3 py-16 text-center bg-emerald-50 rounded-[40px] border border-emerald-100">
-                  <CheckCircle2 className="w-14 h-14 text-emerald-500 mx-auto mb-4 opacity-50" />
-                  <p className="text-xl font-black text-emerald-800 uppercase tracking-tight italic">Operação sob controle</p>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* 2. RESPONSÁVEIS (CARGA RELEVANTE) */}
-          <div className="bg-white rounded-3xl shadow-sm border border-slate-200 p-8">
-            <div className="flex items-center gap-3 mb-8">
-              <div className="w-10 h-10 rounded-2xl bg-slate-100 flex items-center justify-center">
-                <Users className="w-6 h-6 text-slate-600" />
-              </div>
-              <h2 className="text-[17px] font-black text-slate-800 tracking-tight uppercase">Responsáveis (Foco Atual)</h2>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              {operational.responsibleLoad.slice(0, 8).map((res, idx) => (
-                <div key={idx} className="p-6 rounded-[32px] bg-slate-50 border border-slate-100 flex flex-col gap-4 group hover:bg-white hover:border-indigo-100 transition-all">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-2xl bg-indigo-600 text-white flex items-center justify-center font-black text-lg">
-                      {res.name.substring(0, 2).toUpperCase()}
-                    </div>
-                    <div>
-                      <p className="font-black text-slate-800 text-[15px]">{res.name}</p>
-                      <p className="text-[12px] font-black text-indigo-600 opacity-60 uppercase">{res.count} TRATATIVAS</p>
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {res.delayed > 0 && (
-                      <span className="px-3 py-1 bg-red-100 text-red-700 rounded-full text-[10px] font-black uppercase">
-                        {res.delayed} em atraso
-                      </span>
-                    )}
-                    {res.critical > 0 && (
-                      <span className="px-3 py-1 bg-amber-100 text-amber-700 rounded-full text-[10px] font-black uppercase">
-                        {res.critical} críticas
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* 3. LEITURA DO CENÁRIO */}
-          <div className="bg-slate-900 rounded-[48px] p-12 text-white shadow-2xl relative overflow-hidden">
-            <div className="absolute top-0 right-0 w-96 h-96 bg-indigo-500/10 rounded-full -translate-y-1/2 translate-x-1/2 blur-[100px]"></div>
-            <div className="relative z-10">
-              <div className="flex items-center gap-3 mb-8">
-                <div className="bg-white/10 p-2 rounded-xl">
-                  <BarChart3 className="w-6 h-6 text-white" />
-                </div>
-                <h2 className="text-xl font-black uppercase tracking-tighter italic">Leitura do Cenário</h2>
-              </div>
-              <p className="text-[20px] font-medium leading-relaxed text-indigo-50 italic max-w-5xl">
-                "{insight.recommendation}"
-              </p>
-              <div className="mt-12 grid grid-cols-1 sm:grid-cols-3 gap-10 pt-10 border-t border-white/10 text-center sm:text-left">
-                <div className="space-y-1">
-                  <span className="text-[11px] font-black text-indigo-400 uppercase tracking-widest">Foco Principal</span>
-                  <p className="text-[16px] font-bold">{insight.mainProblem}</p>
-                </div>
-                <div className="space-y-1">
-                  <span className="text-[11px] font-black text-indigo-400 uppercase tracking-widest">Volume Reincidência</span>
-                  <p className="text-[16px] font-bold">{insight.reincidence}</p>
-                </div>
-                <div className="space-y-1">
-                  <span className="text-[11px] font-black text-indigo-400 uppercase tracking-widest">Tendência do Período</span>
-                  <p className="text-[16px] font-bold uppercase">{insight.trend}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <>
-          {/* LINHA 1 — RESUMO (KPIs) */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <KPICard 
-          title="TOTAL DE CASES" 
-          value={kpis.cases.value} 
-          icon={<ClipboardList className="w-5 h-5" />} 
-          color="blue"
-        />
-        <KPICard 
-          title="TRATATIVAS ABERTAS" 
-          value={operational.totalActiveTreatments} 
-          icon={<Tag className="w-5 h-5" />} 
-          color="indigo"
-        />
-        <KPICard 
-          title="TRATATIVAS EM ATRASO" 
-          value={operational.delayedCount} 
-          icon={<Clock className="w-5 h-5" />} 
-          color="red"
-          isCritical={operational.delayedCount > 0}
-        />
-        <KPICard 
-          title="REINCIDÊNCIA" 
-          value={kpis.formal.value} 
-          icon={<TrendingUp className="w-5 h-5" />} 
-          color="amber"
-          isCritical={kpis.formal.value > 0}
-        />
-      </div>
-
-      {/* LINHA 2 — SITUAÇÃO E CARGA */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* BLOCO: SITUAÇÃO ATUAL */}
-        <div className="lg:col-span-1 bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col h-full">
-          <div className="flex items-center gap-2 mb-6">
-            <div className="w-2 h-6 bg-red-600 rounded-full"></div>
-            <h2 className="text-[16px] font-black uppercase tracking-tight text-slate-800">Situação Atual</h2>
-          </div>
-          
-          <div className="space-y-3 flex-1">
-            {alerts.slice(0, 4).map((alert, idx) => (
-              <div 
-                key={idx} 
-                className={`p-4 rounded-xl border flex items-start gap-3 transition-all hover:translate-x-1 ${
-                  alert.severity === 'critical' ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-100'
-                }`}
-              >
-                <div className={`mt-1 p-1.5 rounded-md ${alert.severity === 'critical' ? 'bg-red-200 text-red-700' : 'bg-slate-200 text-slate-600'}`}>
-                  <AlertCircle className="w-4 h-4" />
-                </div>
-                <div>
-                  <p className="text-[14px] font-black text-slate-800 leading-tight mb-1">{alert.title}</p>
-                  <p className="text-[13px] text-slate-500 line-clamp-2 mb-3">{alert.message}</p>
-                  
-                  <div className="flex flex-wrap gap-2 mt-4">
-                    <button 
-                      onClick={() => onOpenCase(alert.title.split(' ')[0])}
-                      className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-[9px] font-black uppercase hover:bg-emerald-700 transition-all flex items-center gap-1.5 shadow-sm"
-                    >
-                      <ShieldCheck className="w-3.5 h-3.5" /> Agir
-                    </button>
-                    <button 
-                      onClick={() => onAddTreatment({
-                        id: crypto.randomUUID(),
-                        title: `Tratativa Emergencial: ${alert.title}`,
-                        description: alert.message,
-                        responsible: '',
-                        priority: 'Crítico',
-                        deadline: new Date(Date.now() + 86400000 * 3).toISOString().split('T')[0],
-                        status: 'Aberta',
-                        origin: 'dashboard',
-                        usuario_criador: 'Sistema',
-                        criado_em: new Date().toISOString(),
-                        atualizado_em: new Date().toISOString()
-                      })}
-                      className="px-3 py-1.5 bg-[#003DA5] text-white rounded-lg text-[9px] font-black uppercase hover:bg-blue-800 transition-all flex items-center gap-1.5 shadow-sm"
-                    >
-                      <Plus className="w-3.5 h-3.5" /> Abrir tratativa
-                    </button>
-                    <button 
-                      onClick={() => onOpenCase(alert.title)}
-                      className="px-3 py-1.5 bg-white border-2 border-slate-200 text-slate-700 rounded-lg text-[9px] font-black uppercase hover:bg-slate-50 transition-all flex items-center gap-1.5"
-                    >
-                      <Search className="w-3.5 h-3.5" /> Ver cases relacionados
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-            {alerts.length === 0 && (
-              <div className="flex flex-col items-center justify-center py-12 text-slate-300">
-                <CheckCircle2 className="w-12 h-12 mb-2 opacity-20" />
-                <p className="text-[10px] font-black uppercase">Nenhuma situação pendente</p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* BLOCO: RESPONSÁVEIS */}
-        <div className="lg:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col h-full">
-          <div className="flex items-center gap-2 mb-6">
-            <div className="w-2 h-6 bg-indigo-600 rounded-full"></div>
-            <h2 className="text-[16px] font-black uppercase tracking-tight text-slate-800">Responsáveis</h2>
-          </div>
-          
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1">
-            {operational.responsibleLoad.slice(0, 6).map((res, idx) => (
-              <div 
-                key={idx} 
-                className="p-5 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-between group hover:bg-white hover:border-indigo-200 transition-all"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-11 h-11 rounded-xl bg-indigo-600 text-white flex items-center justify-center text-base font-black shadow-sm group-hover:scale-105 transition-transform">
-                    {res.name.substring(0, 2).toUpperCase()}
-                  </div>
-                  <div>
-                    <p className="text-[14px] font-black text-slate-800">{res.name}</p>
-                    <p className="text-[13px] text-slate-400 font-bold uppercase">{res.count} TRATATIVAS</p>
-                    <button 
-                      onClick={() => setFilters(prev => ({ ...prev, responsible: res.name }))}
-                      className="mt-1 text-[8px] font-black text-indigo-600 uppercase hover:underline opacity-0 group-hover:opacity-100 transition-opacity"
-                    >
-                      Agir / Filtrar
-                    </button>
-                  </div>
-                </div>
-                <div className="flex flex-col items-end gap-2">
-                  {res.delayed > 0 && (
-                    <div className="px-2 py-1 bg-red-100 text-red-700 rounded-lg flex flex-col items-center min-w-[50px]">
-                      <span className="text-[12px] font-black leading-none">{res.delayed}</span>
-                      <span className="text-[8px] font-black tracking-tighter uppercase">ATRASOS</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
-            {operational.responsibleLoad.length === 0 && (
-              <div className="col-span-2 flex flex-col items-center justify-center py-12 text-slate-300">
-                <Users className="w-12 h-12 mb-2 opacity-20" />
-                <p className="text-[10px] font-black uppercase">Sem carga ativa</p>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* LINHA 3 — PRIORITÁRIAS E REINCIDÊNCIA */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* BLOCO: TRATATIVAS PRIORITÁRIAS */}
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
-          <div className="p-5 border-b border-slate-100 flex items-center gap-2 bg-slate-50/30">
-            <ClipboardList className="w-5 h-5 text-slate-400" />
-            <h2 className="text-[16px] font-black uppercase tracking-tight text-slate-800">Tratativas Prioritárias</h2>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="bg-slate-50/50">
-                  <th className="px-6 py-4 text-[11px] font-black text-slate-400 uppercase tracking-widest">Assunto / Título</th>
-                  <th className="px-6 py-4 text-[11px] font-black text-slate-400 uppercase tracking-widest text-center">Status</th>
-                  <th className="px-6 py-4 text-[11px] font-black text-slate-400 uppercase tracking-widest text-center">Prazo</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {filteredTreatments
-                  .sort((a, b) => {
-                    const isADelayed = a.deadline && new Date(a.deadline) < new Date() && a.status !== 'Concluída';
-                    const isBDelayed = b.deadline && new Date(b.deadline) < new Date() && b.status !== 'Concluída';
-                    if (a.priority === 'Crítico' && b.priority !== 'Crítico') return -1;
-                    if (isADelayed && !isBDelayed) return -1;
-                    return 0;
-                  })
-                  .slice(0, 5)
-                  .map((t, idx) => (
-                    <tr 
-                      key={idx} 
-                      className="group hover:bg-indigo-50/30 transition-colors cursor-pointer"
-                      onClick={() => onViewTreatment(t)}
-                    >
-                      <td className="px-6 py-4">
-                        <div className="flex items-center justify-between group/row">
-                          <div>
-                            <p className="text-[14px] font-bold text-slate-700 line-clamp-1">{t.subject || t.title}</p>
-                            <p className="text-[11px] text-slate-400 uppercase font-bold">{t.responsible}</p>
-                          </div>
-                          
-                          <div className="flex gap-2 opacity-0 group-hover/row:opacity-100 transition-opacity">
-                            <button 
-                              onClick={(e) => { e.stopPropagation(); onOpenCase(t.case_numero || t.title); }}
-                              className="px-2 py-1 bg-white border border-slate-200 rounded-md text-[8px] font-black uppercase hover:bg-slate-50 transition-all flex items-center gap-1"
-                            >
-                              <Search className="w-3 h-3" /> Ver cases relacionados
-                            </button>
-                            <button 
-                              onClick={(e) => { e.stopPropagation(); onViewTreatment(t); }}
-                              className="px-2 py-1 bg-emerald-600 text-white rounded-md text-[8px] font-black uppercase hover:bg-emerald-700 transition-all flex items-center gap-1"
-                            >
-                              <ShieldCheck className="w-3 h-3" /> Agir
-                            </button>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <span className={`px-2 py-1 rounded-md text-[10px] font-black uppercase ${
-                          t.status === 'Concluída' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'
-                        }`}>
-                          {t.status}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <div className="flex flex-col">
-                          <span className={`text-[13px] font-black ${
-                            t.deadline && new Date(t.deadline) < new Date() && t.status !== 'Concluída' ? 'text-red-500' : 'text-slate-600'
-                          }`}>
-                            {t.deadline ? format(parseISO(t.deadline), 'dd/MM') : '-'}
-                          </span>
-                          {t.priority === 'Crítico' && <span className="text-[10px] text-red-600 font-black">CRÍTICO</span>}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* BLOCO: REINCIDÊNCIA */}
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
-          <div className="flex items-center gap-2 mb-6">
-            <TrendingUp className="w-5 h-5 text-indigo-600" />
-            <h2 className="text-[16px] font-black uppercase tracking-tight text-slate-800">Reincidência por Tema</h2>
-          </div>
-          <div className="space-y-3">
-            {ranking.filter(r => r.recurrences > 0).slice(0, 5).map((item, idx) => (
-              <div 
-                key={idx} 
-                className="flex items-center justify-between p-4 rounded-xl bg-slate-50 border border-slate-100 group hover:border-indigo-200 transition-all cursor-pointer"
-                onClick={() => onViewSubject(item.category)}
-              >
-                <div className="flex-1 truncate pr-4">
-                  <p className="text-[14px] font-bold text-slate-700 truncate" title={item.category}>
-                    {item.category}
-                  </p>
-                  <div className="flex gap-2 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button 
-                      onClick={(e) => { e.stopPropagation(); onViewSubject(item.category); }}
-                      className="text-[9px] font-black text-blue-600 uppercase hover:underline"
-                    >
-                      Ver cases relacionados
-                    </button>
-                    <span className="text-slate-300 text-[9px]">|</span>
-                    <button 
-                      onClick={(e) => { 
-                        e.stopPropagation(); 
-                        onAddTreatment({
-                          id: crypto.randomUUID(),
-                          title: `Tratativa Reincidência: ${item.category}`,
-                          description: `Tratativa automática para tema recorrente: ${item.category}`,
-                          responsible: '',
-                          priority: item.recurrences > 5 ? 'Crítico' : 'Ação necessária',
-                          deadline: new Date(Date.now() + 86400000 * 7).toISOString().split('T')[0],
-                          status: 'Aberta',
-                          origin: 'dashboard',
-                          usuario_criador: 'Sistema',
-                          criado_em: new Date().toISOString(),
-                          atualizado_em: new Date().toISOString()
-                        });
-                        alert('Tratativa de reincidência vinculada à fila de execução.');
-                      }}
-                      className="text-[9px] font-black text-emerald-600 uppercase hover:underline"
-                    >
-                      Vincular reincidência
-                    </button>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="px-2 py-1 bg-white border border-slate-200 text-slate-500 rounded-lg text-[11px] font-black">
-                    {item.occurrences} CASES
-                  </span>
-                  <span className={`px-2 py-1 rounded-lg text-[11px] font-black ${
-                    item.recurrences > 5 ? 'bg-red-100 text-red-700' : 'bg-indigo-100 text-indigo-700'
-                  }`}>
-                    {item.recurrences} REINCIDÊNCIAS
-                  </span>
-                </div>
-              </div>
-            ))}
-            {ranking.filter(r => r.recurrences > 0).length === 0 && (
-              <div className="flex flex-col items-center justify-center py-12 text-slate-300">
-                <ShieldCheck className="w-12 h-12 mb-2 opacity-20" />
-                <p className="text-[10px] font-black uppercase">Sem reincidências formais</p>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* FOOTER: LEITURA GERENCIAL E AÇÕES RÁPIDAS */}
-      <div className="mt-12 bg-white rounded-[2.5rem] p-10 border border-slate-200 shadow-xl shadow-blue-900/5 relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-64 h-64 bg-[#003DA5]/5 rounded-full -translate-y-1/2 translate-x-1/2 blur-3xl"></div>
-        
-        <div className="flex flex-col lg:flex-row items-center justify-between gap-10">
-          <div className="flex-1 space-y-4">
-            <div className="inline-flex items-center gap-2 px-3 py-1 bg-blue-50 text-[#003DA5] rounded-full text-[9px] font-black uppercase tracking-widest">
-              <Bot className="w-3.5 h-3.5" />
-              Leitura Gerencial do Período
-            </div>
-            <p className="text-lg font-bold text-slate-800 leading-relaxed italic">
-              "{insight.recommendation}"
-            </p>
-            <div className="flex items-center gap-6">
-              <div className="flex flex-col">
-                <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Foco Principal</span>
-                <span className="text-xs font-black text-slate-700 uppercase">{insight.mainProblem}</span>
-              </div>
-              <div className="w-px h-8 bg-slate-100" />
-              <div className="flex flex-col">
-                <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Tendência Sugerida</span>
-                <span className="text-xs font-black text-emerald-600 uppercase">{insight.trend}</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="shrink-0 flex flex-wrap items-center gap-4">
-                    <button 
-                      onClick={() => {
-                        const critical = alerts.find(a => a.severity === 'critical');
-                        if (critical) onOpenCase(critical.title.split(' ')[0]);
-                        else alert("Nenhum tema crítico isolado para ação imediata via dashboard.");
-                      }}
-                      className="px-8 py-4 bg-emerald-600 text-white rounded-[1.25rem] text-[11px] font-black uppercase tracking-widest shadow-lg hover:shadow-xl hover:bg-emerald-700 transition-all flex items-center gap-2 active:scale-95"
-                    >
-                      <ShieldCheck className="w-4.5 h-4.5" />
-                      Agir no Crítico
-                    </button>
-                    <button 
-                      onClick={() => onAddTreatment({
-                        id: crypto.randomUUID(),
-                        title: `Plano Estratégico: ${insight.mainProblem}`,
-                        description: insight.recommendation,
-                        responsible: '',
-                        priority: 'Ação necessária',
-                        deadline: new Date(Date.now() + 86400000 * 5).toISOString().split('T')[0],
-                        status: 'Aberta',
-                        origin: 'dashboard',
-                        usuario_criador: 'Sistema',
-                        criado_em: new Date().toISOString(),
-                        atualizado_em: new Date().toISOString()
-                      })}
-                      className="px-8 py-4 bg-[#003DA5] text-white rounded-[1.25rem] text-[11px] font-black uppercase tracking-widest shadow-lg hover:shadow-xl hover:bg-blue-800 transition-all flex items-center gap-2 active:scale-95"
-                    >
-                      <Plus className="w-4.5 h-4.5" />
-                      Abrir tratativa estratégica
-                    </button>
-          </div>
-        </div>
-      </div>
-    </>
-  )}
-</div>
-  );
-};
-
-interface KPICardProps {
-  title: string;
-  value: string | number;
-  icon: React.ReactNode;
-  trend?: number;
-  color: 'blue' | 'amber' | 'red' | 'indigo';
-  isCritical?: boolean;
-  isText?: boolean;
-}
-
-const KPICard: React.FC<KPICardProps> = ({ title, value, icon, trend, color, isCritical, isText }) => {
-  const colorClasses = {
-    blue: 'text-blue-600 bg-blue-50',
-    amber: 'text-amber-600 bg-amber-50',
-    red: 'text-red-600 bg-red-50',
-    indigo: 'text-indigo-600 bg-indigo-50'
   };
 
+  // Cálculo do Resumo Operacional
+  const operationalSummary = useMemo(() => {
+    const activeStatuses: TicketStatus[] = ['ABERTO', 'EM ANALISE', 'AGUARDANDO', 'DEVOLVIDO'];
+    const activeCases = filteredRecords.filter(r => activeStatuses.includes(r.status));
+    const now = new Date();
+
+    const withMural = activeCases.filter(r => posts.some(p => p.caseId === r.caseId)).length;
+    
+    // Novas métricas de Inteligência Mural
+    const devolvidosSemMural = activeCases.filter(r => 
+      (r.status === 'DEVOLVIDO' || r.status === 'DEVOLVER SOVOS') && 
+      !posts.some(p => p.caseId === r.caseId)
+    ).length;
+
+    const fiveDaysAgo = subDays(now, 5);
+    const semAtualizacaoMural = activeCases.filter(r => {
+      const casePosts = posts.filter(p => p.caseId === r.caseId);
+      if (casePosts.length === 0) return false; 
+      const lastPostDate = new Date(Math.max(...casePosts.map(p => new Date(p.createdAt).getTime())));
+      return isAfter(fiveDaysAgo, lastPostDate);
+    }).length;
+
+    const myMentions = posts.filter(p => 
+      p.status !== 'Encerrado' && (
+        p.mentions.some(m => m.toLowerCase() === (userName || '').toLowerCase()) ||
+        p.description.toLowerCase().includes(`@${(userName || '').toLowerCase()}`)
+      )
+    ).length;
+
+    const aguardando = activeCases.filter(r => !r.returnDate || r.returnDate.trim() === '' || r.returnDate === '-').length;
+    const retrabalhoSovos = activeCases.filter(r => r.status === 'DEVOLVER SOVOS' || r.status === 'DEVOLVIDO').length;
+    const historicoRetrabalho = filteredRecords.filter(r => getReturnInfo(r).wasReturned).length;
+    const reincidencia = filteredRecords.filter(r => 
+      r.isFormalRecurrent || 
+      (r.previousCaseId && String(r.previousCaseId).trim() && !['N/A', 'NA', '-', '0'].includes(String(r.previousCaseId).toUpperCase().trim()))
+    ).length;
+
+    // Calculando "Sem Movimentação" conforme nova regra
+    const threeDaysAgo = subDays(new Date(), 3);
+    const staleCount = activeCases.filter(r => {
+      const openingDate = robustParse(r.openingDate);
+      const returnDate = r.returnDate ? robustParse(r.returnDate) : null;
+      const lastMovement = returnDate && isAfter(returnDate, openingDate) ? returnDate : openingDate;
+      return isAfter(threeDaysAgo, lastMovement);
+    }).length;
+
+    return {
+      total: filteredRecords.length,
+      withMural,
+      devolvidosSemMural,
+      semAtualizacaoMural,
+      myMentions,
+      withoutMural: staleCount, // Usando a nova métrica de "Sem Movimentação" aqui
+      aguardando,
+      retrabalhoSovos,
+      historicoRetrabalho,
+      reincidencia
+    };
+  }, [filteredRecords, posts, userName]);
+
+  // Lógica de "O que precisa de atenção agora" (Top 3)
+  const attentionItems = useMemo(() => {
+    const items = [];
+    const activeStatuses: TicketStatus[] = ['ABERTO', 'EM ANALISE', 'AGUARDANDO', 'DEVOLVER SOVOS', 'DEVOLVIDO'];
+
+    // 1. Retrabalho Sovos
+    const sovostop = filteredRecords.filter(r => r.status === 'DEVOLVER SOVOS' || r.status === 'DEVOLVIDO')[0];
+    if (sovostop) {
+      items.push({
+        type: 'AÇÃO IMEDIATA',
+        title: sovostop.caseId || 'Case',
+        subtitle: sovostop.subject || sovostop.description,
+        meta: 'Status: Devolvido',
+        severity: 'critical',
+        action: () => onOpenCase(sovostop.caseId),
+        icon: <ArrowUpRight className="w-5 h-5" />
+      });
+    }
+
+    // 2. Sem movimentação (Regra FSJ)
+    const threeDaysAgo = subDays(new Date(), 3);
+    const activeCases = records.filter(r => activeStatuses.includes(r.status));
+    
+    const staleCases = activeCases.filter(r => {
+      const openingDate = robustParse(r.openingDate);
+      const returnDate = r.returnDate ? robustParse(r.returnDate) : null;
+      
+      const lastMovement = returnDate && isAfter(returnDate, openingDate) ? returnDate : openingDate;
+      return isAfter(threeDaysAgo, lastMovement);
+    });
+
+    if (staleCases.length > 0 && items.length < 3) {
+      const topStale = staleCases[0];
+      items.push({
+        type: 'ATENÇÃO',
+        title: `${staleCases.length} cases sem movimentação`,
+        subtitle: `Destaque: ${topStale.caseId}`,
+        meta: 'Sem acompanhamento ou retorno recente',
+        severity: 'warning',
+        action: () => onOpenCase(topStale.caseId),
+        icon: <Clock className="w-5 h-5" />
+      });
+    }
+
+    // 3. Aguardando
+    const aguardandoTop = filteredRecords.filter(r => !r.returnDate || r.returnDate.trim() === '' || r.returnDate === '-')[0];
+    if (aguardandoTop && items.length < 3) {
+      items.push({
+        type: 'PENDÊNCIA',
+        title: aguardandoTop.caseId || 'Case',
+        subtitle: aguardandoTop.subject || aguardandoTop.description,
+        meta: 'Aguardando Retorno Sovos',
+        severity: 'info',
+        action: () => onOpenCase(aguardandoTop.caseId),
+        icon: <Minus className="w-5 h-5" />
+      });
+    }
+
+    return items;
+  }, [filteredRecords, posts, onOpenCase]);
+
+  // Carga por analista personalizada
+  const analystLoad = useMemo(() => {
+    const load: Record<string, { total: number, waiting: number, stale: number, withMural: number }> = {};
+    const threeDaysAgo = subDays(new Date(), 3);
+    const activeStatuses: TicketStatus[] = ['ABERTO', 'EM ANALISE', 'AGUARDANDO', 'DEVOLVER SOVOS', 'DEVOLVIDO'];
+
+    filteredRecords.forEach(r => {
+      const resp = r.externalUser || 'Sem Responsável';
+      if (!load[resp]) load[resp] = { total: 0, waiting: 0, stale: 0, withMural: 0 };
+      
+      load[resp].total++;
+      if (!r.returnDate || r.returnDate.trim() === '' || r.returnDate === '-') load[resp].waiting++;
+      
+      const casePosts = posts.filter(p => p.caseId === r.caseId)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      
+      if (casePosts.length > 0) load[resp].withMural++;
+      
+      const isActive = activeStatuses.includes(r.status);
+      if (isActive) {
+        const openingDate = robustParse(r.openingDate);
+        const returnDate = r.returnDate ? robustParse(r.returnDate) : null;
+        const lastMovement = returnDate && isAfter(returnDate, openingDate) ? returnDate : openingDate;
+        
+        if (isAfter(threeDaysAgo, lastMovement)) {
+          load[resp].stale++;
+        }
+      }
+    });
+
+    return Object.entries(load).map(([name, stats]) => ({ name, ...stats }));
+  }, [filteredRecords, posts]);
+
+  // Temas Recorrentes
+  const themesRanking = useMemo(() => calculateRanking(filteredRecords).slice(0, 5), [filteredRecords]);
+
+  // Insights Operacionais - Traduzidos em Ações Concretas
+  const insights = useMemo(() => {
+    const list: Array<{ title: string; data: string; action: string; icon: React.ReactNode; filter?: any }> = [];
+    
+    // 1. Minhas Menções (Prioridade 1 no Dashboard)
+    if (operationalSummary.myMentions > 0) {
+      list.push({
+        title: 'Suas Menções no Mural',
+        data: `Você foi marcado em ${operationalSummary.myMentions} interações que aguardam seu comentário.`,
+        action: 'Verificar posts onde você é o responsável ou consultado.',
+        icon: <Users className="w-5 h-5 text-blue-300" />,
+        filter: { mentions: true }
+      });
+    }
+
+    // 2. Devolvidos sem acompanhamento
+    if (operationalSummary.devolvidosSemMural > 0) {
+      list.push({
+        title: 'Devolvidos sem Intelligence',
+        data: `${operationalSummary.devolvidosSemMural} cases devolvidos não possuem rastreio no Mural Operacional.`,
+        action: 'Cobrar acompanhamento ou registrar status técnico no Mural.',
+        icon: <AlertTriangle className="w-5 h-5 text-red-300" />,
+        filter: { search: 'DEVOLVIDO' }
+      });
+    }
+
+    // 3. Sem atualização recente
+    if (operationalSummary.semAtualizacaoMural > 0) {
+      list.push({
+        title: 'Ausência de Interação',
+        data: `${operationalSummary.semAtualizacaoMural} cases estão sem novas notas no Mural há mais de 5 dias.`,
+        action: 'Verificar status com analista Sovos e atualizar o dashboard/mural.',
+        icon: <Clock className="w-5 h-5 text-amber-300" />,
+        filter: { criticality: 'Atenção' }
+      });
+    }
+
+    // Fallbacks
+    if (list.length < 3) {
+      const devolvidosCount = filteredRecords.filter(r => r.status === 'DEVOLVIDO' || r.status === 'DEVOLVER SOVOS').length;
+      if (devolvidosCount > 0 && !list.find(i => i.title.includes('Devolvidos'))) {
+        list.push({
+          title: 'Volume de Devolvidos',
+          data: `${devolvidosCount} cases no status Devolvido/Devolver Sovos.`,
+          action: 'Acompanhar retorno da SOVOS para evitar atrasos no SLA.',
+          icon: <ArrowUpRight className="w-5 h-5 text-red-300" />
+        });
+      }
+    }
+
+    return list.slice(0, 3);
+  }, [filteredRecords, operationalSummary]);
+
+  // 3.3 FILA OPERACIONAL (PRIORIDADES) - Lógica de Classificação e Ordenação
+  const queueRecords = useMemo(() => {
+    const now = new Date();
+    const today = startOfDay(now);
+    const activeStatuses: TicketStatus[] = ['ABERTO', 'EM ANALISE', 'AGUARDANDO', 'DEVOLVER SOVOS', 'DEVOLVIDO'];
+    
+    const classified = filteredRecords
+      .filter(r => activeStatuses.includes(r.status))
+      .map(r => {
+        const openingDate = robustParse(r.openingDate);
+        const returnDate = r.returnDate ? robustParse(r.returnDate) : null;
+        
+        // SLA Calculation (diff > 9 = crítico, diff > 5 = alerta)
+        const finalDateForSla = returnDate ? startOfDay(returnDate) : today;
+        const diffSla = Math.abs(differenceInDays(finalDateForSla, startOfDay(openingDate)));
+        const isCriticalSla = diffSla > 9;
+        const isAlertSla = diffSla > 5;
+
+        // Movimentação
+        const lastMovement = returnDate && isAfter(returnDate, openingDate) ? returnDate : openingDate;
+        const daysSinceLastMovement = Math.abs(differenceInDays(now, lastMovement));
+
+        let priority: 'ALTA' | 'MÉDIA' | 'BAIXA' = 'BAIXA';
+        let priorityScore = 1;
+
+        // PRIORIDADE ALTA: SLA = CRÍTICO OU STATUS = DEVOLVIDO
+        if (isCriticalSla || r.status === 'DEVOLVIDO' || r.status === 'DEVOLVER SOVOS') {
+          priority = 'ALTA';
+          priorityScore = 3;
+        } 
+        // PRIORIDADE MÉDIA: SLA = ALERTA OU sem retorno (ou sem movimentação > 5 dias)
+        else if (isAlertSla || !r.returnDate || r.returnDate.trim() === '' || r.returnDate === '-' || daysSinceLastMovement > 5) {
+          priority = 'MÉDIA';
+          priorityScore = 2;
+        }
+        // PRIORIDADE BAIXA: SLA = NO PRAZO - case recente
+        else {
+          priority = 'BAIXA';
+          priorityScore = 1;
+        }
+
+        const retInfo = getReturnInfo(r);
+        const slaLabel = isCriticalSla ? 'CRÍTICO' : (isAlertSla ? 'ALERTA' : 'NO PRAZO');
+
+        return { ...r, priority, priorityScore, slaLabel, returnInfo: retInfo };
+      });
+
+    return classified
+      .sort((a, b) => b.priorityScore - a.priorityScore || b.openingDate.localeCompare(a.openingDate))
+      .slice(0, 10);
+  }, [filteredRecords]);
+
   return (
-    <div className={`bg-white p-5 rounded-2xl shadow-sm border ${isCritical ? 'border-red-200 ring-1 ring-red-100' : 'border-slate-200'}`}>
-      <div className="flex items-center justify-between mb-3">
-        <p className="text-[11px] font-black text-slate-400 uppercase tracking-widest">{title}</p>
-        <div className={`p-2 rounded-xl ${colorClasses[color]}`}>
-          {icon}
+    <div className="space-y-6 pb-12 animate-in fade-in duration-700 max-w-5xl mx-auto">
+      {/* 1. BLOCO PRINCIPAL (TOPO FIXO) */}
+      <section className="bg-white rounded-[2.5rem] border-4 border-[#003DA5] p-8 shadow-2xl relative overflow-hidden">
+        <div className="absolute top-0 right-0 w-32 h-32 bg-[#003DA5]/5 rounded-full -mr-16 -mt-16" />
+        
+        <div className="flex items-center justify-between mb-8 relative z-10">
+          <div className="flex items-center gap-4">
+             <div className="w-12 h-12 bg-red-50 rounded-2xl flex items-center justify-center text-red-600 shadow-inner">
+                <AlertCircle className="w-7 h-7" />
+             </div>
+             <div>
+                <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">O que precisa de atenção agora</h2>
+                <p className="text-[11px] font-black text-red-500 uppercase tracking-widest leading-none mt-1">Foco prioritário em ação</p>
+             </div>
+          </div>
+          <div className="flex flex-col items-end gap-3">
+            <select 
+              value={filters.period}
+              onChange={e => setFilters(prev => ({ ...prev, period: e.target.value }))}
+              className="bg-slate-100 px-6 py-2 rounded-2xl text-[10px] font-black text-[#003DA5] uppercase cursor-pointer outline-none hover:bg-blue-50 transition-colors border-2 border-transparent focus:border-[#003DA5]"
+            >
+              <option value="10d">Últimos 10 dias</option>
+              <option value="20d">Últimos 20 dias</option>
+              <option value="30d">Últimos 30 dias</option>
+              <option value="60d">Últimos 60 dias</option>
+              <option value="90d">Últimos 90 dias</option>
+              <option value="all">Todos</option>
+            </select>
+            
+            <label className="flex items-center gap-3 cursor-pointer group">
+              <div className="relative">
+                <input 
+                  type="checkbox" 
+                  className="sr-only peer"
+                  checked={includeOldActiveCases}
+                  onChange={(e) => setIncludeOldActiveCases(e.target.checked)}
+                />
+                <div className="w-10 h-5 bg-slate-100 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[#003DA5]/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#003DA5]"></div>
+              </div>
+              <span className="text-[9px] font-black text-slate-500 uppercase tracking-tight group-hover:text-[#003DA5] transition-colors">Cases ativos antigos</span>
+            </label>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 relative z-10">
+          {attentionItems.length > 0 ? attentionItems.map((item, idx) => (
+            <div 
+              key={idx} 
+              onClick={item.action}
+              className="group bg-slate-50 rounded-[2rem] border-2 border-slate-100 p-6 cursor-pointer hover:border-red-200 hover:bg-white hover:shadow-2xl hover:shadow-red-500/10 transition-all active:scale-[0.98]"
+            >
+              <div className={`w-12 h-12 rounded-2xl flex items-center justify-center mb-5 shadow-sm ${
+                item.severity === 'critical' ? 'bg-red-500 text-white' :
+                item.severity === 'warning' ? 'bg-amber-500 text-white' :
+                'bg-[#003DA5] text-white'
+              }`}>
+                {item.icon}
+              </div>
+              
+              <div className="space-y-2">
+                <p className={`text-[10px] font-black uppercase tracking-widest ${
+                  item.severity === 'critical' ? 'text-red-600' :
+                  item.severity === 'warning' ? 'text-amber-600' :
+                  'text-[#003DA5]'
+                }`}>
+                  {item.type}
+                </p>
+                <h3 className="text-base font-black text-slate-900 leading-tight group-hover:text-red-700 transition-colors line-clamp-1 uppercase">
+                  {item.title}
+                </h3>
+                <p className="text-[11px] font-bold text-slate-500 line-clamp-2 leading-relaxed">
+                  {item.subtitle}
+                </p>
+                <div className="pt-3 border-t border-slate-100 mt-3">
+                  <p className="text-[9px] font-black text-slate-400 uppercase tracking-wider">{item.meta}</p>
+                </div>
+              </div>
+            </div>
+          )) : (
+            <div className="col-span-3 py-12 flex flex-col items-center justify-center text-center bg-slate-50 rounded-[2rem] border-2 border-dashed border-slate-200">
+              <CheckCircle2 className="w-12 h-12 text-emerald-500 mb-4" />
+              <p className="text-sm font-black text-slate-800 uppercase tracking-widest">Tudo em ordem no momento!</p>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* 2. RESUMO OPERACIONAL (LINHA COMPACTA) */}
+      <div className="bg-[#003DA5] rounded-[2rem] p-2 shadow-xl">
+        <div className="flex flex-wrap items-center justify-around gap-4 px-6 py-2">
+           <div className="flex items-center gap-2">
+             <span className="text-[10px] font-black text-white/60 uppercase">Cases:</span>
+             <span className="text-lg font-black text-white">{operationalSummary.total}</span>
+           </div>
+           <div className="w-px h-6 bg-white/20 hidden md:block" />
+           <div className="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => onViewMural?.({})}>
+             <span className="text-[10px] font-black text-white/60 uppercase">Com Mural:</span>
+             <span className="text-lg font-black text-white">{operationalSummary.withMural}</span>
+           </div>
+           <div className="w-px h-6 bg-white/20 hidden md:block" />
+           <div className="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => onViewMural?.({ criticality: 'Atenção' })}>
+             <span className="text-[10px] font-black text-white/60 uppercase">Sem Atualização Mural:</span>
+             <span className="text-lg font-black text-white">{operationalSummary.semAtualizacaoMural}</span>
+             {operationalSummary.semAtualizacaoMural > 0 && <AlertTriangle className="w-4 h-4 text-amber-400 animate-pulse" />}
+           </div>
+           <div className="w-px h-6 bg-white/20 hidden md:block" />
+           <div className="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => onViewMural?.({ mentions: true })}>
+             <span className="text-[10px] font-black text-white/60 uppercase">Minhas Menções:</span>
+             <span className="text-lg font-black text-white">{operationalSummary.myMentions}</span>
+             {operationalSummary.myMentions > 0 && <span className="w-2 h-2 rounded-full bg-blue-400 animate-ping" />}
+           </div>
+           <div className="w-px h-6 bg-white/20 hidden md:block" />
+           <div className="flex items-center gap-2 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => onViewMural?.({ search: 'DEVOLVIDO' })}>
+             <span className="text-[10px] font-black text-white/60 uppercase">Devolvidos s/ Mural:</span>
+             <span className="text-lg font-black text-white">{operationalSummary.devolvidosSemMural}</span>
+           </div>
         </div>
       </div>
-      <div className="flex items-end justify-between">
-        <h3 className={`font-black tracking-tighter leading-none ${isText ? 'text-sm' : 'text-2xl'} text-slate-800`}>
-          {value}
-        </h3>
-        {trend !== undefined && (
-          <div className={`flex items-center text-[10px] font-black ${trend > 0 ? 'text-red-500' : 'text-emerald-500'}`}>
-            {trend > 0 ? <ArrowUpRight className="w-3 h-3 mr-0.5" /> : <ArrowDownRight className="w-3 h-3 mr-0.5" />}
-            {Math.abs(trend)}%
-          </div>
-        )}
+
+      {/* 3. DETALHES (SEÇÕES COLAPSÁVEIS) */}
+      <div className="space-y-4">
+        {/* 3.1 STATUS DOS CASES */}
+        <div className="bg-white rounded-[2rem] border-2 border-slate-100 shadow-sm overflow-hidden">
+          <button 
+            onClick={() => toggleSection('status')}
+            className="w-full px-8 py-5 flex items-center justify-between hover:bg-slate-50 transition-colors"
+          >
+            <div className="flex items-center gap-4">
+              <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center text-[#003DA5]">
+                <Tag className="w-5 h-5" />
+              </div>
+              <h3 className="text-xs font-black text-slate-800 uppercase tracking-[0.2em]">3.1 Status dos Cases</h3>
+            </div>
+            {openSections.status ? <ChevronUp className="w-6 h-6 text-slate-300" /> : <ChevronDown className="w-6 h-6 text-slate-300" />}
+          </button>
+          
+          {openSections.status && (
+            <div className="px-8 pb-10 pt-4 animate-in fade-in slide-in-from-top-4 duration-500">
+               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                  {[
+                    { label: 'Aberto', value: 'ABERTO', color: 'bg-blue-50 text-blue-700 border-blue-100' },
+                    { label: 'Devolvido', value: 'DEVOLVIDO', color: 'bg-red-50 text-red-700 border-red-100' },
+                    { label: 'Concluído', value: 'CONCLUÍDO', color: 'bg-emerald-50 text-emerald-700 border-emerald-100' }
+                  ].map((st, idx) => {
+                    const count = filteredRecords.filter(r => r.status === st.value).length;
+                    return (
+                      <div key={idx} className={`p-6 rounded-[1.5rem] border-2 flex flex-col items-center justify-center text-center ${st.color}`}>
+                        <p className="text-2xl font-black mb-1">{count}</p>
+                        <p className="text-[9px] font-black uppercase tracking-widest">{st.label}</p>
+                      </div>
+                    );
+                  })}
+               </div>
+            </div>
+          )}
+        </div>
+
+        {/* 3.2 CARGA POR ANALISTA */}
+        <div className="bg-white rounded-[2rem] border-2 border-slate-100 shadow-sm overflow-hidden">
+          <button 
+            onClick={() => toggleSection('responsibles')}
+            className="w-full px-8 py-5 flex items-center justify-between hover:bg-slate-50 transition-colors"
+          >
+            <div className="flex items-center gap-4">
+              <div className="w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600">
+                <Users className="w-5 h-5" />
+              </div>
+              <h3 className="text-xs font-black text-slate-800 uppercase tracking-[0.2em]">3.2 Carga por Analista (FSJ)</h3>
+            </div>
+            {openSections.responsibles ? <ChevronUp className="w-6 h-6 text-slate-300" /> : <ChevronDown className="w-6 h-6 text-slate-300" />}
+          </button>
+          
+          {openSections.responsibles && (
+            <div className="px-8 pb-10 pt-4 animate-in fade-in slide-in-from-top-4 duration-500">
+               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {analystLoad.map((res, idx) => (
+                    <div key={idx} className="bg-slate-50 rounded-[2rem] p-6 border border-slate-100">
+                      <div className="flex items-center gap-4 mb-5 pb-4 border-b border-slate-200">
+                        <div className="w-12 h-12 rounded-2xl bg-white shadow-sm flex items-center justify-center font-black text-[#003DA5] text-sm border border-slate-100 uppercase">
+                          {res.name.substring(0, 2)}
+                        </div>
+                        <p className="text-sm font-black text-slate-900 uppercase tracking-tight">{res.name}</p>
+                      </div>
+                      <div className="space-y-3">
+                        <div 
+                          onClick={() => onViewCarga?.(res.name, 'total')}
+                          className="flex justify-between items-center bg-white/60 p-3 rounded-xl cursor-pointer hover:bg-white hover:shadow-sm transition-all"
+                        >
+                          <span className="text-[10px] font-black text-slate-500 uppercase">Total Cases</span>
+                          <span className="text-sm font-black text-slate-900">{res.total}</span>
+                        </div>
+                        <div 
+                          onClick={() => onViewCarga?.(res.name, 'waiting')}
+                          className="flex justify-between items-center bg-white/60 p-3 rounded-xl cursor-pointer hover:bg-white hover:shadow-sm transition-all"
+                        >
+                          <span className="text-[10px] font-black text-slate-500 uppercase">Aguardando</span>
+                          <span className="text-sm font-black text-amber-600">{res.waiting}</span>
+                        </div>
+                        <div 
+                          onClick={() => onViewCarga?.(res.name, 'stale')}
+                          className="flex justify-between items-center bg-red-50 p-3 rounded-xl cursor-pointer hover:bg-red-100 hover:shadow-sm transition-all"
+                        >
+                          <span className="text-[10px] font-black text-red-500 uppercase">Sem Movimentação</span>
+                          <span className="text-sm font-black text-red-600">{res.stale}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+               </div>
+            </div>
+          )}
+        </div>
+
+        {/* 3.3 FILA OPERACIONAL (PRIORIDADES) */}
+        <div className="bg-white rounded-[2rem] border-2 border-slate-100 shadow-sm overflow-hidden">
+          <button 
+            onClick={() => toggleSection('operational')}
+            className="w-full px-8 py-5 flex items-center justify-between hover:bg-slate-50 transition-colors"
+          >
+            <div className="flex items-center gap-4">
+              <div className="w-10 h-10 bg-red-50 rounded-xl flex items-center justify-center text-red-600">
+                <ClipboardList className="w-5 h-5" />
+              </div>
+              <h3 className="text-xs font-black text-slate-800 uppercase tracking-[0.2em]">3.3 Fila Operacional (Prioridades)</h3>
+            </div>
+            {openSections.operational ? <ChevronUp className="w-6 h-6 text-slate-300" /> : <ChevronDown className="w-6 h-6 text-slate-300" />}
+          </button>
+          
+          {openSections.operational && (
+            <div className="px-8 pb-10 pt-4 animate-in fade-in slide-in-from-top-4 duration-500">
+              <div className="bg-slate-50 rounded-[2rem] overflow-hidden border border-slate-200">
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead className="bg-slate-100/50">
+                      <tr>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase text-left">Prioridade</th>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase text-left">Case / Resumo</th>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase text-left">Responsável</th>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase text-center">SLA</th>
+                        <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase text-right">Situação</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {queueRecords.map((r, idx) => (
+                        <tr key={idx} className="hover:bg-blue-50/30 transition-colors cursor-pointer group" onClick={() => onOpenCase(r.caseId)}>
+                          <td className="px-6 py-5">
+                             <div className="flex items-center gap-2">
+                                <div className={`w-2 h-2 rounded-full ${
+                                  r.priority === 'ALTA' ? 'bg-red-500 animate-pulse' :
+                                  r.priority === 'MÉDIA' ? 'bg-amber-500' :
+                                  'bg-emerald-500'
+                                }`} />
+                                <span className={`text-[10px] font-black uppercase ${
+                                  r.priority === 'ALTA' ? 'text-red-600' :
+                                  r.priority === 'MÉDIA' ? 'text-amber-600' :
+                                  'text-emerald-600'
+                                }`}>
+                                  {r.priority}
+                                </span>
+                                {(r as any).returnInfo?.wasReturned && (
+                                  <span className="bg-red-50 text-red-700 px-1.5 py-0.5 rounded-[4px] text-[7px] font-black border border-red-100 italic">
+                                    {(r as any).returnInfo.count > 1 ? `RETRABALHO (${(r as any).returnInfo.count})` : 'RETRABALHO'}
+                                  </span>
+                                )}
+                             </div>
+                          </td>
+                          <td className="px-6 py-5">
+                            <p className="text-xs font-black text-[#003DA5] mb-1">{r.caseId}</p>
+                            <p className="text-[10px] font-bold text-slate-600 line-clamp-1 truncate max-w-xs">{r.subject || r.description}</p>
+                          </td>
+                          <td className="px-6 py-5">
+                            <span className="text-[10px] font-black text-slate-700 uppercase">{r.externalUser || 'Sem Resp'}</span>
+                          </td>
+                          <td className="px-6 py-5 text-center">
+                             <div className="flex flex-col items-center gap-1">
+                                <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase ${
+                                  r.slaLabel === 'CRÍTICO' ? 'bg-red-100 text-red-600' :
+                                  r.slaLabel === 'ALERTA' ? 'bg-amber-100 text-amber-600' :
+                                  'bg-emerald-100 text-emerald-600'
+                                }`}>
+                                  {r.slaLabel}
+                                </span>
+                             </div>
+                          </td>
+                          <td className="px-6 py-5 text-right">
+                             <div className="flex flex-col items-end gap-1">
+                                <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase ${
+                                  r.status?.toUpperCase() === 'DEVOLVIDO' || r.status?.toUpperCase() === 'DEVOLVER SOVOS' ? 'bg-red-500 text-white' : 'bg-amber-100 text-amber-700'
+                                }`}>
+                                  {r.status}
+                                </span>
+                             </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* 3.4 TEMAS RECORRENTES */}
+        <div className="bg-white rounded-[2rem] border-2 border-slate-100 shadow-sm overflow-hidden">
+          <button 
+            onClick={() => toggleSection('themes')}
+            className="w-full px-8 py-5 flex items-center justify-between hover:bg-slate-50 transition-colors"
+          >
+            <div className="flex items-center gap-4">
+              <div className="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center text-amber-600">
+                 <AlertTriangle className="w-5 h-5" />
+              </div>
+              <h3 className="text-xs font-black text-slate-800 uppercase tracking-[0.2em]">3.4 Temas Recorrentes</h3>
+            </div>
+            {openSections.themes ? <ChevronUp className="w-6 h-6 text-slate-300" /> : <ChevronDown className="w-6 h-6 text-slate-300" />}
+          </button>
+          
+          {openSections.themes && (
+            <div className="px-8 pb-10 pt-4 animate-in fade-in slide-in-from-top-4 duration-500">
+               <div className="space-y-4">
+                  {themesRanking.map((theme, idx) => (
+                    <div 
+                      key={idx} 
+                      className="flex items-center justify-between p-6 bg-slate-50 rounded-[1.5rem] border-2 border-transparent hover:border-blue-100 hover:bg-white hover:shadow-lg transition-all group cursor-pointer"
+                      onClick={() => onViewSubject(theme.category)}
+                    >
+                      <div className="flex items-center gap-5">
+                         <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-sm font-black text-slate-300 group-hover:text-[#003DA5] shadow-sm">
+                           #{idx + 1}
+                         </div>
+                         <p className="text-xs font-black text-slate-700 uppercase tracking-tight group-hover:text-slate-900">{theme.category}</p>
+                      </div>
+                      <div className="flex items-center gap-4">
+                         <div className="text-right">
+                            <p className="text-lg font-black text-slate-900 leading-none">{theme.occurrences}</p>
+                            <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mt-1">Cases</p>
+                         </div>
+                         <ArrowUpRight className="w-5 h-5 text-slate-300 group-hover:text-[#003DA5]" />
+                      </div>
+                    </div>
+                  ))}
+               </div>
+            </div>
+          )}
+        </div>
+
+        {/* 3.5 INSIGHTS OPERACIONAIS */}
+        <div className="bg-white rounded-[2rem] border-2 border-slate-100 shadow-sm overflow-hidden">
+          <button 
+            onClick={() => toggleSection('insights')}
+            className="w-full px-8 py-5 flex items-center justify-between hover:bg-slate-50 transition-colors"
+          >
+            <div className="flex items-center gap-4">
+              <div className="w-10 h-10 bg-purple-50 rounded-xl flex items-center justify-center text-purple-600">
+                <Bot className="w-5 h-5" />
+              </div>
+              <h3 className="text-xs font-black text-slate-800 uppercase tracking-[0.2em]">3.5 Insights Operacionais</h3>
+            </div>
+            {openSections.insights ? <ChevronUp className="w-6 h-6 text-slate-300" /> : <ChevronDown className="w-6 h-6 text-slate-300" />}
+          </button>
+          
+          {openSections.insights && (
+            <div className="px-8 pb-10 pt-4 animate-in fade-in slide-in-from-top-4 duration-500">
+               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  {insights.map((insight, idx) => (
+                    <div 
+                      key={idx} 
+                      onClick={() => insight.filter && onViewMural?.(insight.filter)}
+                      className={`bg-gradient-to-br from-slate-900 to-[#003DA5] p-6 rounded-[2rem] text-white shadow-xl relative overflow-hidden flex flex-col h-full transition-transform active:scale-[0.98] ${insight.filter ? 'cursor-pointer hover:shadow-2xl hover:shadow-blue-900/40' : ''}`}
+                    >
+                      <div className="absolute top-0 right-0 w-24 h-24 bg-white/5 rounded-full -mr-12 -mt-12" />
+                      <div className="relative z-10 flex flex-col h-full">
+                        <div className="w-10 h-10 bg-white/10 rounded-xl flex items-center justify-center mb-4 backdrop-blur-sm border border-white/10">
+                          {insight.icon}
+                        </div>
+                        <h4 className="text-[11px] font-black uppercase tracking-wider mb-3 text-blue-200">{insight.title}</h4>
+                        <div className="space-y-4 flex-grow">
+                          <p className="text-xs font-bold leading-tight text-white/90">
+                            <span className="block text-[8px] uppercase tracking-widest text-white/50 mb-1">Situação:</span>
+                            {insight.data}
+                          </p>
+                          <p className="text-xs font-bold leading-tight text-blue-100 italic">
+                            <span className="block text-[8px] uppercase tracking-widest text-blue-400/60 mb-1 not-italic">Recomendação:</span>
+                            {insight.action}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+               </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

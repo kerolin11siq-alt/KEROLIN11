@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Connectivity Test Path
+    match /test/connection {
+      allow get: if true;
+    }
+
+    // Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 1. Users
+    match /users/{userId} {
+      allow get, list: if isSignedIn();
+      allow create, update: if isSignedIn() && request.auth.uid == userId;
+      allow delete: if isSignedIn();
+    }
+
+    // 2. Tickets
+    match /tickets/{ticketId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(ticketId)
+                     && incoming().id == ticketId
+                     && incoming().caseId is string
+                     && incoming().caseId.size() <= 64;
+      allow update: if isSignedIn() && isValidId(ticketId);
+      allow delete: if isSignedIn() && isValidId(ticketId);
+    }
+
+    // 3. MuralPosts
+    match /muralPosts/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(postId)
+                     && incoming().id == postId;
+      allow update: if isSignedIn() && isValidId(postId);
+      allow delete: if isSignedIn() && isValidId(postId);
+    }
+
+    // 4. Treatments
+    match /treatments/{treatmentId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(treatmentId);
+      allow update: if isSignedIn() && isValidId(treatmentId);
+      allow delete: if isSignedIn() && isValidId(treatmentId);
+    }
+
+    // 5. Notifications
+    match /notifications/{notifId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && isValidId(notifId);
+      allow update: if isSignedIn() && isValidId(notifId) && resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(notifId) && resource.data.userId == request.auth.uid;
+    }
+
+    // 6. KnowledgeBase
+    match /knowledgeBase/{kbId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isValidId(kbId);
+    }
+
+    // 7. Configs (System)
+    match /configs/{configId} {
+      allow read, write: if isSignedIn() && isValidId(configId);
+    }
+  }
+}

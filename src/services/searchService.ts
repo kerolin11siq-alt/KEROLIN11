@@ -284,7 +284,7 @@ export const smartSearch = (
   // Generate Answer
   let answer = "";
   const open = results.filter(r => r.record.status === 'ABERTO').length;
-  const concluded = results.filter(r => r.record.status === 'CONCLUIDO').length;
+  const concluded = results.filter(r => r.record.status === 'CONCLUÍDO').length;
 
   if (intent === 'reincidencia') {
     if (recorrenciaCount > 0 || reincidenciaFormalCount > 0) {

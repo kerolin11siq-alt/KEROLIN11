@@ -1,0 +1,76 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 1. Users Collection
+    match /users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn(); // Open to search for mentions
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isSignedIn() && request.auth.uid == userId 
+                     && incoming().diff(existing()).affectedKeys().hasOnly(['name']);
+    }
+
+    // 2. Tickets (Cases)
+    match /tickets/{ticketId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(ticketId)
+                     && incoming().keys().hasAll(['id', 'caseId', 'status', 'creatorUser', 'createdAt'])
+                     && incoming().createdAt == request.time;
+      allow update: if isSignedIn() 
+                     && incoming().updatedAt == request.time;
+    }
+
+    // 3. KnowledgeBase
+    match /knowledgeBase/{knowledgeId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn(); // Restricted in production if needed
+    }
+
+    // 4. MuralPosts
+    match /muralPosts/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(postId)
+                     && incoming().userId == request.auth.uid
+                     && incoming().createdAt == request.time;
+      allow update: if isSignedIn()
+                     && (incoming().userId == request.auth.uid || incoming().diff(existing()).affectedKeys().hasOnly(['status', 'comments', 'treatment', 'tags']));
+    }
+
+    // 5. Treatments
+    match /treatments/{treatmentId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(treatmentId);
+      allow update: if isSignedIn();
+    }
+
+    // 6. Notifications
+    match /notifications/{notifId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn(); // Mentions can create notifications
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid 
+                     && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+    }
+  }
+}

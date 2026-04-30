@@ -116,11 +116,59 @@ export const processarBaseAnalitica = (records: TicketRecord[]): TicketRecord[] 
   return processed.reverse(); 
 };
 
+export interface GrowthTrendData {
+  value: number | null;
+  label: string;
+  trend: 'up' | 'down' | 'stable';
+}
+
+/**
+ * Utilitário central para cálculo de tendência de crescimento (Pillar de Segurança e Confiabilidade)
+ */
+export const calculateGrowthTrend = (current: number, previous: number): GrowthTrendData => {
+  // Regra 4: Dados inválidos
+  if (current === undefined || current === null || previous === undefined || previous === null) {
+    return { value: null, label: "Sem dados", trend: 'stable' };
+  }
+
+  // Regra 3: Se atual = 0 e anterior = 0
+  if (current === 0 && previous === 0) {
+    return { value: 0, label: "Sem dados", trend: 'stable' };
+  }
+
+  // Regra 2: Se anterior = 0 e atual > 0
+  if (previous === 0 && current > 0) {
+    return { value: 100, label: "Novo no período", trend: 'up' };
+  }
+
+  // Regra 1: Se período anterior > 0
+  if (previous > 0) {
+    const variation = ((current - previous) / previous) * 100;
+    
+    // Proteção contra Infinity ou NaN
+    if (isNaN(variation) || !isFinite(variation)) {
+      return { value: null, label: "Sem base comparativa", trend: 'stable' };
+    }
+
+    const rounded = Number(variation.toFixed(1));
+    const label = `${rounded > 0 ? '+' : ''}${rounded.toLocaleString('pt-BR')}%`;
+    
+    let trend: 'up' | 'down' | 'stable' = 'stable';
+    if (rounded > 0.1) trend = 'up';
+    else if (rounded < -0.1) trend = 'down';
+
+    return { value: rounded, label, trend };
+  }
+
+  return { value: null, label: "Sem base comparativa", trend: 'stable' };
+};
+
 export interface ThemeTrend {
   category: string;
   currentCount: number;
   prevCount: number;
-  variation: number;
+  variation: number | null;
+  label: string;
   trend: 'up' | 'down' | 'stable';
 }
 
@@ -146,26 +194,15 @@ export const calculateThemeTrends = (currentRecords: TicketRecord[], prevRecords
     const current = currentCounts[category] || 0;
     const prev = prevCounts[category] || 0;
     
-    let variation = 0;
-    let trend: 'up' | 'down' | 'stable' = 'stable';
-    
-    if (prev === 0 && current > 0) {
-      variation = 100;
-      trend = 'up';
-    } else if (prev > 0) {
-      variation = Math.round(((current - prev) / prev) * 100);
-      if (variation > 5) trend = 'up';
-      else if (variation < -5) trend = 'down';
-    } else if (current === 0 && prev === 0) {
-      trend = 'stable';
-    }
+    const trendData = calculateGrowthTrend(current, prev);
     
     return {
       category,
       currentCount: current,
       prevCount: prev,
-      variation,
-      trend
+      variation: trendData.value,
+      label: trendData.label,
+      trend: trendData.trend
     };
   }).sort((a, b) => b.currentCount - a.currentCount);
 };
@@ -313,9 +350,10 @@ export const calculateAutomaticAlerts = (
   });
 
   // 2. FALTA DE RETORNO DA SOVOS (Cases sem atualização por tempo)
-  // Como TicketRecord não tem updatedAt, usamos openingDate para casos ABERTOS que estão há muito tempo sem retorno
+  // Como TicketRecord não tem updatedAt, usamos openingDate para casos ATIVOS que estão há muito tempo sem retorno
+  const activeStatuses = ['ABERTO', 'DEVOLVIDO'];
   const staleOpenCases = baseAnalitica.filter(r => 
-    r.status === 'ABERTO' && 
+    activeStatuses.includes(r.status) && 
     !r.returnDate && 
     differenceInDays(now, parseISO(r.openingDate)) > 7
   );
@@ -450,7 +488,7 @@ export const getSmartSuggestions = (
     try { return isAfter(parseISO(r.openingDate), sevenDaysAgo); } catch(e) { return false; }
   }).length;
   
-  const openSimilarCases = categoryHistory.filter(r => r.status !== 'CONCLUIDO');
+  const openSimilarCases = categoryHistory.filter(r => r.status !== 'CONCLUÍDO');
   const hasOpenSimilar = openSimilarCases.length > 0;
 
   // 4. Sugestão de Criticidade

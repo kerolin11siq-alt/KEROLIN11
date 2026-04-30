@@ -1,0 +1,109 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "System user profile",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "Ticket": {
+      "title": "Ticket (Case)",
+      "description": "Original case record from SOVOS or manual entry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "caseId": { "type": "string" },
+        "type": { "type": "string" },
+        "openingDate": { "type": "string" },
+        "user": { "type": "string" },
+        "externalUser": { "type": "string" },
+        "description": { "type": "string" },
+        "scenarios": { "type": "string" },
+        "observations": { "type": "string" },
+        "status": { "type": "string" },
+        "creatorUser": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "origin": { "type": "string" }
+      }
+    },
+    "CaseKnowledge": {
+      "title": "Case Knowledge",
+      "description": "Analytical layers for a specific case",
+      "type": "object",
+      "properties": {
+        "caseId": { "type": "string" },
+        "lastUpdated": { "type": "string" }
+      }
+    },
+    "MuralPost": {
+      "title": "Mural Post",
+      "description": "Operational post in the mural",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "type": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "subject": { "type": "string" },
+        "criticality": { "type": "string" },
+        "status": { "type": "string" }
+      }
+    },
+    "MuralTreatment": {
+      "title": "Mural Treatment",
+      "description": "Operational follow-up for a post or case",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "responsible": { "type": "string" },
+        "status": { "type": "string" },
+        "priority": { "type": "string" }
+      }
+    },
+    "MuralNotification": {
+      "title": "Mural Notification",
+      "description": "Notification for mentions or updates",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "read": { "type": "boolean" }
+      }
+    }
+  },
+  "firestore": {
+    "users": {
+      "schema": "User",
+      "description": "Global user registry"
+    },
+    "tickets": {
+      "schema": "Ticket",
+      "description": "Historical cases and ticket records"
+    },
+    "caseKnowledge": {
+      "schema": "CaseKnowledge",
+      "description": "Analytical insights per case"
+    },
+    "muralPosts": {
+      "schema": "MuralPost",
+      "description": "Real-time operational communication"
+    },
+    "treatments": {
+      "schema": "MuralTreatment",
+      "description": "Active operational treatments"
+    },
+    "notifications": {
+      "schema": "MuralNotification",
+      "description": "User notifications"
+    }
+  }
+}

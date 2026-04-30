@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { X, Save, ClipboardList, User as UserIcon, Users, Calendar, AlertCircle, CheckCircle2, MessageSquare, StickyNote, Link2, CalendarCheck, CalendarDays, AlertTriangle, Info, Search, Loader2, ArrowRight, ShieldCheck, Plus } from 'lucide-react';
-import { TicketRecord, TicketStatus, TicketType, KnowledgeBase, CaseKnowledge, MuralPost, User } from '../types';
+import { TicketRecord, TicketStatus, TicketType, KnowledgeBase, CaseKnowledge, MuralPost, User, MuralTreatment } from '../types';
 import { aiManager, AIPriority } from '../src/services/aiManager';
 import { performSearch, prioritizeResults } from '../src/services/searchService';
 import { getSmartSuggestions, getAiClassification } from '../src/services/analyticsService';
@@ -15,9 +15,22 @@ interface RecordFormProps {
   users: User[];
   defaultUser?: string;
   muralPosts?: MuralPost[];
+  onAddTreatment?: (treatment: MuralTreatment) => void;
+  onSendToMural?: (record: TicketRecord, createTreatment?: boolean) => void;
 }
 
-const RecordForm: React.FC<RecordFormProps> = ({ onSubmit, onClose, initialData, records, kb, users, defaultUser, muralPosts = [] }) => {
+const RecordForm: React.FC<RecordFormProps> = ({ 
+  onSubmit, 
+  onClose, 
+  initialData, 
+  records, 
+  kb, 
+  users, 
+  defaultUser, 
+  muralPosts = [],
+  onAddTreatment,
+  onSendToMural
+}) => {
   const getLocalDateString = () => {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -39,7 +52,7 @@ const RecordForm: React.FC<RecordFormProps> = ({ onSubmit, onClose, initialData,
     status: 'ABERTO' as TicketStatus,
     creatorUser: defaultUser || '',
     createdAt: new Date().toISOString(),
-    origin: 'manual' as 'manual' | 'mural' | 'workflow' | 'import',
+    origin: 'manual' as 'manual' | 'manual' | 'mural' | 'workflow' | 'import',
     muralPostId: undefined as string | undefined
   });
 
@@ -327,7 +340,7 @@ const RecordForm: React.FC<RecordFormProps> = ({ onSubmit, onClose, initialData,
     e.preventDefault();
     
     // Se concluir e não tiver data, assume hoje
-    if (formData.status === 'CONCLUIDO' && !formData.conclusionDate) {
+    if (formData.status === 'CONCLUÍDO' && !formData.conclusionDate) {
        formData.conclusionDate = getLocalDateString();
     }
     
@@ -497,10 +510,14 @@ const RecordForm: React.FC<RecordFormProps> = ({ onSubmit, onClose, initialData,
               </div>
               <div className="md:col-span-1">
                 <label className="block text-[10px] font-black text-gray-950 uppercase mb-1 tracking-widest">Status</label>
-                <select value={formData.status} onChange={e => setFormData({...formData, status: e.target.value as TicketStatus})} className={`w-full px-4 py-3 border-2 rounded-2xl font-black text-xs outline-none transition-all ${formData.status === 'DEVOLVIDO' ? 'border-amber-400 bg-amber-50 text-amber-950' : formData.status === 'CONCLUIDO' ? 'border-emerald-400 bg-emerald-50 text-emerald-950' : 'border-gray-200 text-gray-900 focus:border-[#003DA5]'}`}>
+                <select value={formData.status} onChange={e => setFormData({...formData, status: e.target.value as TicketStatus})} className={`w-full px-4 py-3 border-2 rounded-2xl font-black text-xs outline-none transition-all ${
+                  formData.status === 'DEVOLVIDO' ? 'border-amber-400 bg-amber-50 text-amber-950' : 
+                  formData.status === 'CONCLUÍDO' ? 'border-emerald-400 bg-emerald-50 text-emerald-950' : 
+                  'border-gray-200 text-gray-900 focus:border-[#003DA5]'
+                }`}>
                   <option value="ABERTO">ABERTO</option>
                   <option value="DEVOLVIDO">DEVOLVIDO</option>
-                  <option value="CONCLUIDO">RESOLVIDO</option>
+                  <option value="CONCLUÍDO">CONCLUÍDO</option>
                 </select>
               </div>
             </div>
@@ -686,7 +703,25 @@ const RecordForm: React.FC<RecordFormProps> = ({ onSubmit, onClose, initialData,
                   <span className="text-[10px] font-black text-[#003DA5] uppercase tracking-widest">Identificado como: {defaultUser}</span>
                 </div>
               )}
-              <div className="flex gap-4 w-full md:w-auto flex-grow">
+              <div className="flex flex-wrap gap-4 w-full md:w-auto flex-grow">
+                {initialData?.id && onSendToMural && (
+                  <>
+                    <button 
+                      type="button" 
+                      onClick={() => onSendToMural(initialData as TicketRecord, false)} 
+                      className="px-4 py-2 bg-slate-100 text-slate-700 rounded-2xl font-black uppercase text-[10px] hover:bg-slate-200 transition-colors flex items-center gap-2 border border-slate-200"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" /> Enviar ao Mural
+                    </button>
+                    <button 
+                      type="button" 
+                      onClick={() => onSendToMural(initialData as TicketRecord, true)} 
+                      className="px-4 py-2 bg-indigo-50 text-indigo-700 rounded-2xl font-black uppercase text-[10px] hover:bg-indigo-100 transition-colors flex items-center gap-2 border border-indigo-200"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Enviar e Criar Tratativa
+                    </button>
+                  </>
+                )}
                 <button type="button" onClick={onClose} className="flex-1 py-4 bg-gray-100 text-gray-600 font-black uppercase text-xs rounded-2xl hover:bg-gray-200 transition-colors">Cancelar</button>
                 <button type="submit" className="flex-[2] py-4 bg-[#003DA5] text-white font-black uppercase text-xs rounded-2xl shadow-xl hover:bg-blue-800 flex items-center justify-center gap-3 transition-all transform hover:scale-[1.02]">
                   <Save className="w-4 h-4" /> Efetivar Registro Sovos

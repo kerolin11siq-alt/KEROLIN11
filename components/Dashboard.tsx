@@ -1,5 +1,6 @@
 
 import React, { useMemo, useState } from 'react';
+import { standardizeName } from '../src/services/userService';
 import { TicketRecord, TicketStatus } from '../types';
 import { 
   BarChart, Bar, XAxis, YAxis, ResponsiveContainer, 
@@ -11,6 +12,7 @@ import {
 import { 
   Activity as ActivityIcon, ShieldAlert as ShieldAlertIcon, 
   Trophy as TrophyIcon, Medal as MedalIcon, Link2 as Link2Icon, Users as UsersIcon, 
+  Briefcase as BriefcaseIcon,
   SearchCode as SearchCodeIcon, RotateCcw as RotateCcwIcon, 
   Layers as LayersIcon, PieChart as PieChartIcon, 
   TrendingUp as TrendingUpIcon, Star as StarIcon, Timer as TimerIcon, Zap as ZapIcon,
@@ -26,6 +28,12 @@ interface DashboardProps {
   contextRecords: TicketRecord[];
   onLocateLineage: (caseId: string) => void;
   onFilterAction: (key: string, value: string) => void;
+  dateFilters?: {
+    startDate?: string;
+    endDate?: string;
+    retStartDate?: string;
+    retEndDate?: string;
+  };
 }
 
 const FSJ_COLORS = {
@@ -45,7 +53,8 @@ const FSJ_COLORS = {
 const STATUS_CONFIG: Record<string, { color: string, label: string }> = {
   'CONCLUÍDO': { color: '#059669', label: 'CONCLUÍDO' },
   'ABERTO': { color: '#003DA5', label: 'ABERTO' },
-  'DEVOLVIDO': { color: '#ea580c', label: 'DEVOLVIDO' }
+  'DEVOLVIDO': { color: '#ea580c', label: 'DEVOLVIDO' },
+  'NÃO INFORMADO': { color: '#94a3b8', label: 'NÃO INFORMADO' }
 };
 
 const robustDateParse = (dateStr: string | undefined): Date | null => {
@@ -61,20 +70,39 @@ const robustDateParse = (dateStr: string | undefined): Date | null => {
   return null;
 };
 
-const normalizeStatusStrict = (status: string | undefined): string | null => {
-  if (!status || status === '-' || status.trim() === '') return null;
-  const s = status
+const fixEncoding = (str: string): string => {
+  if (!str) return '';
+  return str
+    .replace(/\ufffd/g, ' ')
+    // Common Mojibake fixes for Brazilian Portuguese
+    .replace(/Ã¡/g, 'á').replace(/Ã /g, 'à').replace(/Ã¢/g, 'â').replace(/Ã£/g, 'ã')
+    .replace(/Ã©/g, 'é').replace(/Ãª/g, 'ê')
+    .replace(/Ã\u00ad/g, 'í').replace(/Ã³/g, 'ó').replace(/Ã´/g, 'ô').replace(/Ãµ/g, 'õ')
+    .replace(/Ãº/g, 'ú')
+    .replace(/Ã§/g, 'ç')
+    .replace(/Ã\u0081/g, 'Á').replace(/Ã\u0089/g, 'É').replace(/Ã\u008d/g, 'Í').replace(/Ã\u0093/g, 'Ó').replace(/Ã\u009a/g, 'Ú')
+    // Specific mentioned broken names
+    .replace(/D BORA/g, 'DÉBORA') 
+    .trim();
+};
+
+const normalizeStatusStrict = (status: string | undefined): string => {
+  if (!status || status === '-' || status.trim() === '') return 'NÃO INFORMADO';
+  
+  let s = status
     .trim()
     .toUpperCase()
-    .replace(/[\u0000-\u001F\u007F-\u009F]/g, "") 
-    .replace(/[\n\r\t]/g, "")
-    .replace(/\s+/g, " ")
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, "");
+    // Remove non-printable characters and replacement characters (like )
+    .replace(/[\u0000-\u001F\u007F-\u009F\uFFFD]/g, "")
+    .replace(/\s+/g, " ");
 
-  if (['ABERTO', 'EM ABERTO'].includes(s)) return 'ABERTO';
-  if (['CONCLUIDO', 'FINALIZADO', 'RESOLVIDO', 'CONCLUIDA'].includes(s)) return 'CONCLUÍDO';
-  if (['DEVOLVIDO', 'RETORNADO', 'REABERTO'].includes(s)) return 'DEVOLVIDO';
+  // Normalização agressiva para CONCLUÍDO (lidando com encoding quebrado)
+  if (s.includes('CONCLU') && (s.includes('DO') || s.includes('IDO'))) return 'CONCLUÍDO';
+  if (s === 'CONCLUIDO') return 'CONCLUÍDO';
+  
+  if (s === 'DEVOLVIDO') return 'DEVOLVIDO';
+  if (s === 'ABERTO') return 'ABERTO';
+  
   return s; 
 };
 
@@ -114,10 +142,34 @@ const EndPointMarker = (props: any) => {
 
 type DashboardTab = 'general' | 'productivity' | 'bottlenecks' | 'cycle' | 'risk' | 'quality';
 
-const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocateLineage, onFilterAction }) => {
+const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocateLineage, onFilterAction, dateFilters }) => {
   const [activeTab, setActiveTab] = useState<DashboardTab>('general');
   const [selectedCycleMonth, setSelectedCycleMonth] = useState<string | null>(null);
   const today = useMemo(() => startOfDay(new Date()), []);
+
+  // Auxiliar para identificar retrabalho dinamicamente baseado em palavras-chave na OBS
+  const getReturnInfo = (r: TicketRecord) => {
+    const obs = (r.observations || '').toLowerCase();
+    // Keywords requested: devolvido, reaberto, reabertura, retorno incorreto, devolução
+    const keywords = ['devolvido', 'reaberto', 'reabertura', 'retorno incorreto', 'devolução'];
+    let count = 0;
+    
+    // Contar ocorrências totais das palavras-chave na OBS
+    keywords.forEach(kw => {
+      const regex = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+      const matches = obs.match(regex);
+      if (matches) count += matches.length;
+    });
+
+    // O status DEVOLVIDO por si só já conta como 1 devolução se não houver nas observações ainda
+    const statusIsDevolvido = normalizeStatusStrict(r.status) === 'DEVOLVIDO';
+    const finalCount = count + (statusIsDevolvido && count === 0 ? 1 : 0);
+
+    return {
+      wasReturned: finalCount > 0,
+      count: finalCount
+    };
+  };
 
   const stats = useMemo(() => {
     try {
@@ -129,15 +181,16 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
       let minSlaDays = Infinity;
       let totalOnTime = 0;
       let validRecordsCount = 0;
-      
+      let ctxNoPrazo = 0, ctxAlerta = 0, ctxCritico = 0;
       let openCasesCount = 0;
       let sumBacklogAge = 0;
       let oldestBacklogAge = 0;
 
-      const userMap: Record<string, { total: number, onTime: number, devolved: number, sumSla: number, concluded: number }> = {};
+      const analystMap: Record<string, { total: number, onTime: number, devolved: number, sumSla: number, concluded: number }> = {};
       const errorMap: Record<string, number> = {};
       const errorMonthlyMap: Map<string, Record<string, number>> = new Map();
       const solicitantMap: Record<string, number> = {};
+      const IGNORED_NAMES = new Set(['', '-', 'N/A', 'NA', 'NUL', 'NULL', 'UNDEFINED']);
       const monthlyMap: Map<string, { 
         month: string, 
         PRODUÇÃO: number, 
@@ -147,7 +200,7 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
         timestamp: number,
         records: TicketRecord[]
       }> = new Map();
-      const statusCounts: Record<string, number> = { 'ABERTO': 0, 'CONCLUÍDO': 0, 'DEVOLVIDO': 0 };
+      const statusCounts: Record<string, number> = { 'ABERTO': 0, 'DEVOLVIDO': 0, 'CONCLUÍDO': 0, 'NÃO INFORMADO': 0 };
       const typeCounts: Record<string, number> = { 'PRODUÇÃO': 0, 'PROJETO': 0 };
       const devolucaoReasons: Record<string, number> = {};
       const reincidenciaReasons: Record<string, number> = {};
@@ -155,8 +208,9 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
       let sumSlaDevolvidos = 0;
       
       let totalConcluidos = 0;
-      let concluidosSemRetrabalho = 0;
-      let reprocessadosCount = 0;
+      let totalReincidentes = 0;
+      let totalRetrabalho = 0;
+      let concluidosPerfeitos = 0; // Sem reincidência E sem retrabalho
 
       const rootMap = new Map<string, string>();
       [...records].sort((a,b) => (robustDateParse(a.openingDate)?.getTime() || 0) - (robustDateParse(b.openingDate)?.getTime() || 0))
@@ -171,6 +225,16 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
       const reincidenceGroups: Record<string, { count: number, members: TicketRecord[] }> = {};
 
       const monthlyQuality = new Map<string, { total: number, withoutRework: number }>();
+      
+      // Para tendências de risco baseadas no filtro atual
+      const currentMonthRiskStats = { noPrazo: 0, alerta: 0, critico: 0 };
+      const prevRiskStats = { noPrazo: 0, alerta: 0, critico: 0 };
+      const monthsKeysRef = Array.from(new Set(records.map(r => {
+        const d = robustDateParse(r.openingDate);
+        return d ? format(d, 'yyyy-MM') : null;
+      }).filter(Boolean))).sort().reverse();
+      const currentMonthKeyRef = monthsKeysRef[0];
+      const prevMonthKeyRef = monthsKeysRef[1];
 
       records.forEach(r => {
         const caseIdValid = (r.caseId && r.caseId !== '-' && r.caseId.trim() !== '');
@@ -180,11 +244,17 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
         const mappedStatus = normalizeStatusStrict(r.status);
         const rawType = (r.type || '').toUpperCase().trim();
         const normalizedType = rawType === 'PROJETO' ? 'PROJETO' : 'PRODUÇÃO';
-        const u = (r.user || r.externalUser || 'S/A').toUpperCase().trim();
-        const sName = (r.externalUser || 'DESCONHECIDO').toUpperCase().trim();
+        
+        // PADRONIZAÇÃO DO SOLICITANTE (RANKING FSJ) - Vindo da coluna "USUÁRIO" via ImportModal
+        const sName = standardizeName(r.externalUser || '');
+        const solicitantClean = (r.externalUser || '').toUpperCase().trim();
 
-        // Use normalizedCategory from the record if available, fallback to description
-        const errorDesc = r.normalizedCategory || (r.description || 'NÃO INFORMADO').toUpperCase().trim();
+        // PADRONIZAÇÃO DO ANALISTA (ATENDENTE SOVOS) - Vindo da coluna "ANALISTA"
+        const aName = standardizeName(r.user || '');
+        const analystClean = (r.user || '').toUpperCase().trim();
+
+        // Use description as the primary grouping for "Assuntos"
+        const errorDesc = (r.description || r.normalizedCategory || r.subject || 'NÃO INFORMADO').toUpperCase().trim();
 
         const root = rootMap.get(r.caseId) || r.caseId;
         if (!reincidenceGroups[root]) reincidenceGroups[root] = { count: 0, members: [] };
@@ -205,24 +275,39 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
           reincidenciaReasons[errorDesc] = (reincidenciaReasons[errorDesc] || 0) + 1;
         }
 
-        solicitantMap[sName] = (solicitantMap[sName] || 0) + 1;
+        // Agrupar por solicitante FSJ (Coluna Usuário)
+        const sRaw = fixEncoding(r.externalUser || '').trim();
+        const solicitantDisplay = sRaw ? sRaw.toUpperCase() : 'NÃO INFORMADO';
+        
+        // Filtrar apenas valores que não são placeholders genéricos, mas permitir "NÃO INFORMADO" se for o caso
+        if (solicitantDisplay !== 'NÃO INFORMADO' && !['S/A', 'DESCONHECIDO', 'N/A', 'NA', '-', '0'].includes(solicitantDisplay)) {
+          solicitantMap[solicitantDisplay] = (solicitantMap[solicitantDisplay] || 0) + 1;
+        } else if (solicitantDisplay === 'NÃO INFORMADO') {
+          // Opcional: decidir se inclui "NÃO INFORMADO" no ranking. 
+          // Dada a regra "ignorar no ranking" anterior, mas a nova regra "marcar como não informado",
+          // vou incluir para dar visibilidade à falha de preenchimento, exceto se todos forem assim.
+          solicitantMap[solicitantDisplay] = (solicitantMap[solicitantDisplay] || 0) + 1;
+        }
+
+        const isReincidente = r.isFormalRecurrent || (r.previousCaseId && String(r.previousCaseId).trim() && !['N/A', 'NA', '-', '0'].includes(String(r.previousCaseId).toUpperCase().trim()));
+        const returnInfo = getReturnInfo(r);
+        const isRetrabalho = returnInfo.wasReturned;
 
         if (mappedStatus === 'CONCLUÍDO') {
           totalConcluidos++;
-          const hasPrev = r.isFormalRecurrent || (r.previousCaseId && String(r.previousCaseId).trim() && !['N/A', 'NA', '-', '0'].includes(String(r.previousCaseId).toUpperCase().trim()));
-          if (!hasPrev) concluidosSemRetrabalho++;
+          if (!isReincidente && !isRetrabalho) concluidosPerfeitos++;
 
           if (openDateRaw) {
             const monthKey = format(openDateRaw, 'yyyy-MM');
             const q = monthlyQuality.get(monthKey) || { total: 0, withoutRework: 0 };
             q.total++;
-            if (!hasPrev) q.withoutRework++;
+            if (!isReincidente && !isRetrabalho) q.withoutRework++;
             monthlyQuality.set(monthKey, q);
           }
         }
-        if (r.isFormalRecurrent || (r.previousCaseId && String(r.previousCaseId).trim() && !['N/A', 'NA', '-', '0'].includes(String(r.previousCaseId).toUpperCase().trim()))) {
-          reprocessadosCount++;
-        }
+        
+        if (isReincidente) totalReincidentes++;
+        if (isRetrabalho) totalRetrabalho++;
 
         if (mappedStatus !== 'CONCLUÍDO') {
           if (openDateRaw) {
@@ -244,6 +329,23 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
           totalSlaSum += conclusionDiff;
           if (conclusionDiff > maxSlaDays) maxSlaDays = conclusionDiff;
           if (conclusionDiff < minSlaDays) minSlaDays = conclusionDiff;
+          
+          if (conclusionDiff <= 5) ctxNoPrazo++;
+          else if (conclusionDiff <= 9) ctxAlerta++;
+          else ctxCritico++;
+
+          // Trend Risk stats
+          const caseMonth = format(startOfOpen, 'yyyy-MM');
+          if (caseMonth === currentMonthKeyRef) {
+            if (conclusionDiff <= 5) currentMonthRiskStats.noPrazo++;
+            else if (conclusionDiff <= 9) currentMonthRiskStats.alerta++;
+            else currentMonthRiskStats.critico++;
+          } else if (caseMonth === prevMonthKeyRef) {
+            if (conclusionDiff <= 5) prevRiskStats.noPrazo++;
+            else if (conclusionDiff <= 9) prevRiskStats.alerta++;
+            else prevRiskStats.critico++;
+          }
+
           if (conclusionDiff <= 5) totalOnTime++;
 
           const monthKey = format(startOfOpen, 'yyyy-MM');
@@ -259,22 +361,25 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
           existing.records.push(r);
           monthlyMap.set(monthKey, existing);
 
-          if (!userMap[u]) userMap[u] = { total: 0, onTime: 0, devolved: 0, sumSla: 0, concluded: 0 };
-          userMap[u].total++;
-          userMap[u].sumSla += conclusionDiff;
-          if (conclusionDiff <= 5) userMap[u].onTime++;
-          if (mappedStatus === 'DEVOLVIDO') userMap[u].devolved++;
-          if (mappedStatus === 'CONCLUÍDO') userMap[u].concluded++;
+          if (aName && aName !== 'Desconhecido' && !IGNORED_NAMES.has(analystClean)) {
+            if (!analystMap[aName]) analystMap[aName] = { total: 0, onTime: 0, devolved: 0, sumSla: 0, concluded: 0 };
+            analystMap[aName].total++;
+            analystMap[aName].sumSla += conclusionDiff;
+            if (conclusionDiff <= 5) analystMap[aName].onTime++;
+            if (mappedStatus === 'DEVOLVIDO') analystMap[aName].devolved++;
+            if (mappedStatus === 'CONCLUÍDO') analystMap[aName].concluded++;
+          }
 
-          // Mapa mensal de erros para tendências - Using normalizedCategory
-          const e = r.normalizedCategory || (r.description || 'NÃO INFORMADO').toUpperCase().trim();
+          // Use subject as primary grouping for trends
+          const e = (r.subject || r.normalizedCategory || r.description || 'NÃO INFORMADO').toUpperCase().trim();
           errorMap[e] = (errorMap[e] || 0) + 1;
           if (!errorMonthlyMap.has(e)) errorMonthlyMap.set(e, {});
           const eMonthCounts = errorMonthlyMap.get(e)!;
           eMonthCounts[monthKey] = (eMonthCounts[monthKey] || 0) + 1;
         }
 
-        if (mappedStatus === 'DEVOLVIDO') {
+        const retInfo = getReturnInfo(r);
+        if (retInfo.wasReturned) {
           totalDevolvidos++;
           const openD = robustDateParse(r.openingDate);
           const retD = robustDateParse(r.returnDate);
@@ -290,8 +395,8 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
           const membersSorted = [...data.members].sort((a,b) => (robustDateParse(a.openingDate)?.getTime() || 0) - (robustDateParse(b.openingDate)?.getTime() || 0));
           const lastOccur = membersSorted[0].openingDate;
           
-          // Use normalizedCategory from the first member if available
-          const reason = membersSorted[0].normalizedCategory || (membersSorted[0].description || 'NÃO INFORMADO').toUpperCase().trim();
+          // Use subject as primary reason for audit data
+          const reason = (membersSorted[0].subject || membersSorted[0].normalizedCategory || membersSorted[0].description || 'NÃO INFORMADO').toUpperCase().trim();
           
           let slaImpact = 0;
           let firstSla = 0;
@@ -303,8 +408,10 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
             if (idx === 0) firstSla = diff;
           });
 
-          // Check if any member is marked as formal recurrent (has previous case)
-          const isRecurrent = data.count > 1 || data.members.some(m => m.isFormalRecurrent);
+          // Reincidência Formal: apenas se houver lineage ou marcador formal, NÃO via keywords de OBS
+          const isRecurrent = data.count > 1 || data.members.some(m => 
+            m.isFormalRecurrent || (m.previousCaseId && String(m.previousCaseId).trim() && !['N/A', 'NA', '-', '0'].includes(String(m.previousCaseId).toUpperCase().trim()))
+          );
 
           return { 
             rootId, 
@@ -393,55 +500,58 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
 
       const efficiencyIndex = isSlaLevelFilterActive 
         ? (contextRecords.length > 0 ? ((records.length / contextRecords.length) * 100).toFixed(0) : '0')
-        : (validRecordsCount > 0 ? ((totalOnTime / validRecordsCount) * 100).toFixed(0) : '0');
+        : (validRecordsCount > 0 ? ((ctxNoPrazo / validRecordsCount) * 100).toFixed(0) : '0');
 
-      let ctxNoPrazo = 0, ctxAlerta = 0, ctxCritico = 0;
-      let prevRiskStats = { noPrazo: 0, alerta: 0, critico: 0 };
-      
-      contextRecords.forEach(r => {
-        const openD = robustDateParse(r.openingDate);
-        if (!openD) return;
-        
-        const monthKey = format(openD, 'yyyy-MM');
-        const finalDate = robustDateParse(r.returnDate) ? startOfDay(robustDateParse(r.returnDate)!) : today;
-        const diff = Math.abs(differenceInDays(finalDate, startOfDay(openD)));
-        
-        const isCurrent = monthKey === currentMonthKey;
-        const isPrev = monthKey === prevMonthKey;
+      const riskTrends = {
+          noPrazo: getTrend(currentMonthRiskStats.noPrazo, prevRiskStats.noPrazo),
+          alerta: getTrend(currentMonthRiskStats.alerta, prevRiskStats.alerta),
+          critico: getTrend(currentMonthRiskStats.critico, prevRiskStats.critico)
+      };
 
-        if (diff <= 5) {
-            ctxNoPrazo++;
-            if (isPrev) prevRiskStats.noPrazo++;
-        } else if (diff <= 9) {
-            ctxAlerta++;
-            if (isPrev) prevRiskStats.alerta++;
-        } else {
-            ctxCritico++;
-            if (isPrev) prevRiskStats.critico++;
-        }
-      });
-
-      const currentMonthRiskStats = { noPrazo: 0, alerta: 0, critico: 0 };
-      contextRecords.forEach(r => {
-          const openD = robustDateParse(r.openingDate);
-          if (openD && format(openD, 'yyyy-MM') === currentMonthKey) {
-              const finalDate = robustDateParse(r.returnDate) ? startOfDay(robustDateParse(r.returnDate)!) : today;
-              const diff = Math.abs(differenceInDays(finalDate, startOfDay(openD)));
-              if (diff <= 5) currentMonthRiskStats.noPrazo++;
-              else if (diff <= 9) currentMonthRiskStats.alerta++;
-              else currentMonthRiskStats.critico++;
-          }
-      });
-
-      const analystRanking = Object.entries(userMap).map(([name, data]) => ({
+      const analystRanking = Object.entries(analystMap).map(([name, data]) => ({
         name, count: data.total, total: data.total, onTime: data.onTime, concluido: data.concluded,
         avgSla: data.total > 0 ? (data.sumSla / data.total).toFixed(1) : '0.0',
         efficiency: data.total > 0 ? ((data.concluded / data.total) * 100).toFixed(0) : '0',
         label: `${data.total} (${validRecordsCount > 0 ? ((data.total / validRecordsCount) * 100).toFixed(0) : '0'}%)`
       })).sort((a, b) => b.count - a.count);
 
-      const rftIndex = totalConcluidos > 0 ? ((concluidosSemRetrabalho / totalConcluidos) * 100).toFixed(1) : '100.0';
+      const solicitantRankingRaw = Object.entries(solicitantMap).map(([name, count]) => ({
+        name, count,
+        share: validRecordsCount > 0 ? ((count / validRecordsCount) * 100).toFixed(1) : '0'
+      })).sort((a, b) => b.count - a.count);
+
+      const solicitantRanking = solicitantRankingRaw.map((item, idx) => ({
+        ...item,
+        label: `${idx + 1}º ${item.name} — ${item.count} cases`
+      }));
+
+      const rftIndex = totalConcluidos > 0 ? ((concluidosPerfeitos / totalConcluidos) * 100).toFixed(1) : '100.0';
       const qualityInconsistency = Number(rftIndex) === 100 && (totalDevolvidos > 0 || auditData.length > 0);
+
+      const reworkRate = validRecordsCount > 0 ? (totalRetrabalho / validRecordsCount) * 100 : 0;
+      const reworkAlert = reworkRate > 5;
+
+      const periodRef = (() => {
+        const { startDate, endDate, retStartDate, retEndDate } = dateFilters || {};
+        
+        if (startDate && endDate && startDate === endDate) {
+            return `Abertura: ${format(parseISO(startDate), "dd/MM/yy")}`;
+        }
+        
+        if (startDate || endDate) {
+            const start = startDate ? format(parseISO(startDate), 'dd/MM/yy') : 'Início';
+            const end = endDate ? format(parseISO(endDate), 'dd/MM/yy') : 'Hoje';
+            return `Abertura: ${start} até ${end}`;
+        }
+        
+        if (retStartDate || retEndDate) {
+            const start = retStartDate ? format(parseISO(retStartDate), 'dd/MM/yy') : 'Início';
+            const end = retEndDate ? format(parseISO(retEndDate), 'dd/MM/yy') : 'Hoje';
+            return `Retorno: ${start} até ${end}`;
+        }
+        
+        return 'Base total (sem filtro de período)';
+      })();
 
       return { 
         total: records.length, validRecordsCount, efficiencyIndex, efficiencyLabel: isSlaLevelFilterActive ? 'Participação' : 'Conformidade',
@@ -455,46 +565,48 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
           const count = statusCounts[name] || 0;
           const totalStatus = Object.values(statusCounts).reduce((a,b)=>a+b, 0);
           return { name, value: count, color: STATUS_CONFIG[name]?.color || '#cbd5e1', realPercent: totalStatus > 0 ? ((count / totalStatus) * 100).toFixed(1) : '0.0' };
-        }).filter(i => i.value > 0),
+        }).filter(i => i.value > 0 || ['ABERTO', 'CONCLUÍDO', 'DEVOLVIDO'].includes(i.name)),
         typeChart: [
           { name: 'Produção', value: typeCounts['PRODUÇÃO'], color: FSJ_COLORS.blue },
           { name: 'Projeto', value: typeCounts['PROJETO'], color: FSJ_COLORS.red }
         ].map(i => ({ ...i, realPercent: validRecordsCount > 0 ? ((i.value / validRecordsCount) * 100).toFixed(1) : '0.0' })),
-        analystRanking, errorRanking, podiumSolicitants: Object.entries(solicitantMap).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 3),
+        analystRanking, solicitantRanking, errorRanking, podiumSolicitants: solicitantRanking.slice(0, 3),
         auditData, totalDevolvidos, percentDevolvidos: validRecordsCount > 0 ? ((totalDevolvidos / validRecordsCount) * 100).toFixed(1) : '0.0',
         avgSlaDevolvidos: totalDevolvidos > 0 ? (sumSlaDevolvidos / totalDevolvidos).toFixed(1) : '0.0',
         monthlyEvolutionData, cycleTimeData, cycleSummary,
-        periodRef: currentMonthKey ? format(parse(currentMonthKey, 'yyyy-MM', new Date()), 'MMM/yyyy', { locale: ptBR }).toUpperCase() : 'N/A',
-        riskTrends: {
-            noPrazo: getTrend(currentMonthRiskStats.noPrazo, prevRiskStats.noPrazo),
-            alerta: getTrend(currentMonthRiskStats.alerta, prevRiskStats.alerta),
-            critico: getTrend(currentMonthRiskStats.critico, prevRiskStats.critico)
-        },
+        periodRef,
+        riskTrends,
         rftIndex,
         rftTrend,
+        reworkRate,
+        reworkAlert,
         avgReworkDelay,
         topReworkReason,
         topReworkCount,
         topDevolReason,
         topReincReason,
         rftBase: totalConcluidos,
-        concluidosSemRetrabalho,
-        reprocessadosCount,
+        concluidosPerfeitos,
+        totalConcluidos,
+        totalReincidentes,
+        totalRetrabalho,
         qualityInconsistency,
-        funnel: [
-          { step: 'Início', value: validRecordsCount, label: 'DEMANDA TOTAL', color: 'bg-blue-600' },
-          { step: 'Em Tratamento', value: statusCounts['ABERTO'], label: 'BACKLOG ATIVO', color: 'bg-blue-400' },
-          { step: 'Concluídos', value: totalConcluidos, label: 'ENTREGAS TOTAIS', color: 'bg-emerald-600' },
-          { step: 'Devolvidos', value: totalDevolvidos, label: 'REJEIÇÕES TÉCNICAS', color: 'bg-red-600' },
-          { step: 'Reprocessados', value: reprocessadosCount, label: 'RETRABALHO OPERACIONAL', color: 'bg-orange-600' },
-          { step: 'Finalizados s/ Retrabalho', value: concluidosSemRetrabalho, label: 'QUALIDADE ASSEGURADA', color: 'bg-indigo-600' }
+        operationalFunnel: [
+          { step: 'Entrada', value: validRecordsCount, label: 'TOTAL', color: 'bg-blue-600' },
+          { step: 'Backlog', value: statusCounts['ABERTO'], label: 'EM ABERTO', color: 'bg-blue-400' },
+          { step: 'Saída', value: totalConcluidos, label: 'CONCLUÍDOS', color: 'bg-emerald-600' }
+        ],
+        qualityFunnel: [
+          { step: 'Base', value: totalConcluidos, label: 'VOLUME CONCLUÍDO', color: 'bg-emerald-600' },
+          { step: 'RFT', value: concluidosPerfeitos, label: 'CONFORMIDADE (RFT)', color: 'bg-blue-600' },
+          { step: 'Falha', value: totalRetrabalho, label: 'PROCESSAMENTO COM RETRABALHO', color: 'bg-orange-600' }
         ]
       };
     } catch (e) {
       console.error("Erro crítico no Dashboard:", e);
       return null;
     }
-  }, [records, contextRecords]);
+  }, [records, contextRecords, dateFilters]);
 
   if (!stats) return <div className="p-20 text-center uppercase font-black text-gray-400 italic flex flex-col items-center gap-4"><AlertCircle className="w-12 h-12" />Processando Dashboard...</div>;
 
@@ -573,67 +685,96 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                </div>
             </section>
 
-            <section className="bg-white p-8 rounded-[2.5rem] shadow-2xl border border-gray-200 flex flex-col justify-between h-full">
-              <div className="flex items-center justify-between mb-6 border-b border-gray-200 pb-4"><h3 className="text-xs font-black uppercase tracking-tight text-black flex items-center gap-2"><RotateCcwIcon className="w-4 h-4 text-amber-700" /> Monitor Devolvidos</h3></div>
+            <section 
+              onClick={() => onFilterAction('devolvidos', 'true')}
+              className="bg-white p-8 rounded-[2.5rem] shadow-2xl border border-gray-200 flex flex-col justify-between h-full cursor-pointer hover:shadow-red-500/10 hover:border-red-200 hover:scale-[1.02] transition-all active:scale-[0.98] group"
+            >
+              <div className="flex items-center justify-between mb-6 border-b border-gray-200 pb-4">
+                <h3 className="text-xs font-black uppercase tracking-tight text-black flex items-center gap-2 group-hover:text-red-700 transition-colors">
+                  <RotateCcwIcon className="w-4 h-4 text-amber-700" /> Monitor Devolvidos
+                </h3>
+                <ExternalLink className="w-3 h-3 text-gray-300 group-hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all" />
+              </div>
               <div className="flex-grow flex flex-col items-center justify-center py-4">
                  {stats.totalDevolvidos === 0 ? (
-                    <div className="text-center animate-in zoom-in duration-500"><CheckCircle className="w-12 h-12 text-emerald-700 mx-auto mb-2" /><p className="text-xl font-black text-emerald-700">CONFORME</p></div>
+                    <div className="text-center animate-in zoom-in duration-500">
+                      <CheckCircle className="w-12 h-12 text-emerald-700 mx-auto mb-2" />
+                      <p className="text-xl font-black text-emerald-700">CONFORME</p>
+                    </div>
                  ) : (
-                    <div className="text-center"><span className="text-[10px] font-black text-gray-700 uppercase tracking-widest">Taxa Devolução</span><p className="text-6xl font-black text-black italic leading-none drop-shadow-md">{stats.percentDevolvidos}%</p><div className="mt-4 inline-flex items-center gap-2 px-4 py-1.5 bg-red-50 text-red-800 rounded-full border border-red-200"><ArrowUpRight className="w-4 h-4" /><span className="text-[10px] font-black uppercase">ALERTA</span></div></div>
+                    <div className="text-center animate-in zoom-in duration-500">
+                       <AlertTriangle className="w-12 h-12 text-red-600 mx-auto mb-2" />
+                       <p className="text-lg font-black text-red-600 uppercase leading-tight">Retrabalho Identificado</p>
+                       <p className="text-[10px] font-bold text-gray-500 uppercase mt-1">
+                         {stats.totalDevolvidos} cases devolvidos/reabertos
+                       </p>
+                       <div className="mt-4 inline-flex items-center gap-2 px-4 py-1.5 bg-red-50 text-red-800 rounded-full border border-red-200">
+                         <span className="text-[10px] font-black uppercase">Atenção</span>
+                       </div>
+                    </div>
                  )}
               </div>
-              <div className="mt-6 bg-gray-50 p-4 rounded-2xl flex items-center justify-between border border-gray-200"><span className="text-[9px] font-black text-gray-700 uppercase">Total Devolvidos</span><span className="text-xl font-black text-black drop-shadow-sm">{stats.totalDevolvidos}</span></div>
+              <div className="mt-6 bg-gray-50 p-4 rounded-2xl flex items-center justify-between border border-gray-200">
+                <span className="text-[9px] font-black text-gray-700 uppercase">Incidência Geral</span>
+                <span className="text-xl font-black text-black drop-shadow-sm">{stats.percentDevolvidos}%</span>
+              </div>
             </section>
           </div>
 
-          {/* PERFORMANCE E INCIDÊNCIAS DE REGRAS (RESTAURADO) */}
+          {/* PERFORMANCE ANALISTAS E ASSUNTOS */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
             <section className="bg-white p-8 rounded-[2rem] shadow-lg flex flex-col h-[400px]">
-              <h3 className="text-[11px] font-black uppercase mb-6 flex items-center gap-3 text-gray-900 border-b pb-4 tracking-widest"><UsersIcon className="w-5 h-5 text-[#003DA5]" /> Performance Analistas</h3>
+              <div className="flex items-center justify-between mb-6 border-b pb-4">
+                <h3 className="text-[11px] font-black uppercase flex items-center gap-3 text-gray-900 tracking-widest"><UsersIcon className="w-5 h-5 text-[#003DA5]" /> Performance Analistas (SOVOS)</h3>
+                <span className="text-[9px] font-black bg-blue-50 text-[#003DA5] px-3 py-1 rounded-full">TOP {stats.analystRanking.length}</span>
+              </div>
               <div className="flex-grow overflow-y-auto pr-2 custom-scrollbar">
-                <ResponsiveContainer width="100%" height={Math.max(300, stats.analystRanking.length * 40)}>
-                  <BarChart data={stats.analystRanking} layout="vertical" margin={{ top: 10, right: 80, left: 10, bottom: 5 }}>
-                    <XAxis type="number" hide />
-                    <YAxis dataKey="name" type="category" width={100} tick={{ fontSize: 9, fontWeight: 900, fill: '#1f2937' }} axisLine={false} tickLine={false} />
-                    <Bar dataKey="count" fill={FSJ_COLORS.blue} radius={[0, 8, 8, 0]} barSize={20} onClick={(d) => onFilterAction('user', d.name)}><LabelList dataKey="label" position="right" style={{ fontSize: 9, fontWeight: 900, fill: '#003DA5' }} offset={12} /></Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+                {stats.analystRanking.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={Math.max(300, stats.analystRanking.length * 40)}>
+                    <BarChart data={stats.analystRanking} layout="vertical" margin={{ top: 10, right: 80, left: 10, bottom: 5 }}>
+                      <XAxis type="number" hide />
+                      <YAxis dataKey="name" type="category" width={100} tick={{ fontSize: 9, fontWeight: 900, fill: '#1f2937' }} axisLine={false} tickLine={false} />
+                      <Bar dataKey="count" fill={FSJ_COLORS.blue} radius={[0, 8, 8, 0]} barSize={20} onClick={(d) => onFilterAction('user', d.name)}><LabelList dataKey="label" position="right" style={{ fontSize: 9, fontWeight: 900, fill: '#003DA5' }} offset={12} /></Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-full flex flex-col items-center justify-center text-center p-10 opacity-50">
+                    <UsersIcon className="w-10 h-10 mb-4" />
+                    <p className="text-[10px] font-black uppercase tracking-widest">Nenhum analista identificado</p>
+                  </div>
+                )}
               </div>
             </section>
+
             <section className="bg-white p-8 rounded-[2rem] shadow-lg flex flex-col h-[400px]">
-              <h3 className="text-[11px] font-black uppercase mb-6 flex items-center gap-3 text-gray-900 border-b pb-4 tracking-widest"><ShieldAlertIcon className="w-5 h-5 text-[#D91B2A]" /> DESCRIÇÃO DO ASSUNTO / ERRO</h3>
+              <div className="flex items-center justify-between mb-6 border-b pb-4">
+                <h3 className="text-[11px] font-black uppercase flex items-center gap-3 text-gray-900 tracking-widest"><ShieldAlertIcon className="w-5 h-5 text-[#D91B2A]" /> Volume por Assunto / Tema</h3>
+                <span className="text-[9px] font-black bg-red-50 text-[#D91B2A] px-3 py-1 rounded-full">{stats.errorRanking.length} CATEGORIAS</span>
+              </div>
               <div className="flex-grow overflow-y-auto pr-2 custom-scrollbar">
-                <ResponsiveContainer width="100%" height={Math.max(300, stats.errorRanking.length * 40)}>
-                  <BarChart 
-                    data={stats.errorRanking} 
-                    layout="vertical" 
-                    margin={{ top: 10, right: 80, left: 10, bottom: 5 }}
-                    onClick={(state) => {
-                      if (state && state.activeLabel) {
-                        onFilterAction('error', String(state.activeLabel));
-                      }
-                    }}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    <XAxis type="number" hide />
-                    <YAxis 
-                      dataKey="name" 
-                      type="category" 
-                      width={100} 
-                      tick={{ fontSize: 9, fontWeight: 900, fill: '#1f2937', cursor: 'pointer' }} 
-                      axisLine={false} 
-                      tickLine={false} 
-                    />
-                    <Bar 
-                      dataKey="count" 
-                      fill={FSJ_COLORS.red} 
-                      radius={[0, 8, 8, 0]} 
-                      barSize={20}
+                {stats.errorRanking.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={Math.max(300, stats.errorRanking.length * 40)}>
+                    <BarChart 
+                      data={stats.errorRanking} 
+                      layout="vertical" 
+                      margin={{ top: 10, right: 80, left: 10, bottom: 5 }}
+                      onClick={(state) => {
+                        if (state && state.activeLabel) {
+                          onFilterAction('error', String(state.activeLabel));
+                        }
+                      }}
+                      style={{ cursor: 'pointer' }}
                     >
-                      <LabelList dataKey="label" position="right" style={{ fontSize: 9, fontWeight: 900, fill: '#D91B2A' }} offset={12} />
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+                      <XAxis type="number" hide />
+                      <YAxis dataKey="name" type="category" width={100} tick={{ fontSize: 9, fontWeight: 900, fill: '#1f2937' }} axisLine={false} tickLine={false} />
+                      <Bar dataKey="count" fill={FSJ_COLORS.red} radius={[0, 8, 8, 0]} barSize={20}>
+                        <LabelList dataKey="label" position="right" style={{ fontSize: 9, fontWeight: 900, fill: '#D91B2A' }} offset={12} />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-full flex flex-col items-center justify-center text-center p-10 opacity-50"><ShieldAlertIcon className="w-10 h-10 mb-4" /><p className="text-[10px] font-black uppercase tracking-widest">Sem dados de assuntos</p></div>
+                )}
               </div>
             </section>
           </div>
@@ -641,11 +782,26 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
           {/* STATUS E TIPO */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             <section className="bg-white p-8 rounded-[2rem] shadow-lg border border-gray-100">
-                <h3 className="text-[11px] font-black uppercase mb-6 tracking-widest text-gray-900">Status Operacional</h3>
+                <div className="flex justify-between items-start mb-6">
+                  <div>
+                    <h3 className="text-[11px] font-black uppercase tracking-widest text-gray-900">Status Operacional</h3>
+                    <p className="text-[9px] font-bold text-[#003DA5] uppercase mt-1">Coluna usada: STATUS</p>
+                  </div>
+                </div>
                 {stats.statusChart.length > 0 ? (
                   <div className="flex items-center gap-8">
                     <div className="w-1/2 h-40"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={stats.statusChart} innerRadius={35} outerRadius={55} dataKey="value" stroke="none">{stats.statusChart.map((e, i) => <RechartsCell key={i} fill={e.color} />)}</Pie><Tooltip content={<CustomTooltip />} /></PieChart></ResponsiveContainer></div>
-                    <div className="w-1/2 space-y-1.5">{stats.statusChart.slice(0,3).map((item, idx) => (<div key={idx} className="flex justify-between text-[10px] font-black uppercase"><span>{item.name} — {item.value} ({item.realPercent}%)</span></div>))}</div>
+                    <div className="w-1/2 space-y-1.5">
+                      {stats.statusChart.map((item, idx) => (
+                        <div key={idx} className="flex justify-between items-center text-[10px] font-black uppercase text-gray-800 gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: item.color }} />
+                            <span>{item.name}</span>
+                          </div>
+                          <span>{item.value} ({item.realPercent}%)</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ) : (
                   <div className="h-40 flex items-center justify-center text-[10px] font-black uppercase text-gray-400 italic">Sem dados no período</div>
@@ -656,7 +812,17 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                 {stats.typeChart.some(i => i.value > 0) ? (
                   <div className="flex items-center gap-8">
                     <div className="w-1/2 h-40"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={stats.typeChart} innerRadius={35} outerRadius={55} dataKey="value" stroke="none">{stats.typeChart.map((e, i) => <RechartsCell key={i} fill={e.color} />)}</Pie><Tooltip content={<CustomTooltip />} /></PieChart></ResponsiveContainer></div>
-                    <div className="w-1/2 space-y-1.5">{stats.typeChart.map((item, idx) => (<div key={idx} className="flex justify-between text-[10px] font-black uppercase"><span>{item.name} — {item.value} ({item.realPercent}%)</span></div>))}</div>
+                    <div className="w-1/2 space-y-1.5">
+                      {stats.typeChart.map((item, idx) => (
+                        <div key={idx} className="flex justify-between items-center text-[10px] font-black uppercase gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: item.color }} />
+                            <span>{item.name}</span>
+                          </div>
+                          <span>{item.value} ({item.realPercent}%)</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ) : (
                   <div className="h-40 flex items-center justify-center text-[10px] font-black uppercase text-gray-400 italic">Sem dados no período</div>
@@ -665,7 +831,7 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
           </div>
 
           {/* MONITOR DE REINCIDÊNCIA (RETRABALHO) */}
-          <section className="bg-white rounded-[2rem] border-4 border-white shadow-2xl overflow-hidden">
+          <section className="bg-white rounded-[2rem] border-4 border-white shadow-2xl overflow-hidden mb-12">
             <div className="px-10 py-6 bg-[#003DA5] text-white flex items-center justify-between border-b-[6px] border-[#D91B2A]">
               <div className="flex items-center gap-5"><Link2Icon className="w-8 h-8 text-white" /><div><h3 className="text-xl font-black uppercase tracking-widest leading-none">Monitor de Retrabalho (REINCIDÊNCIA)</h3><p className="text-[10px] font-black text-white/80 mt-2 uppercase tracking-widest italic">Casos processados mais de uma vez</p></div></div>
               <div className="text-right"><p className="text-3xl font-black tracking-tighter leading-none">{stats.auditData.length}</p><p className="text-[10px] font-black uppercase tracking-widest opacity-80">Linhagens</p></div>
@@ -675,7 +841,7 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                 <thead className="bg-gray-50 border-b sticky top-0 z-10"><tr><th className="px-10 py-4">Case Raiz</th><th className="px-8 py-4">Solicitante</th><th className="px-8 py-4 text-center">Aberturas</th><th className="px-10 py-4 text-center">Ação</th></tr></thead>
                 <tbody className="divide-y divide-gray-100">
                   {stats.auditData.map((row, idx) => (
-                    <tr key={idx} className="hover:bg-red-50 transition-colors"><td className="px-10 py-4 text-[#D91B2A] font-black">{row.rootId}</td><td className="px-8 py-4 text-gray-900 truncate max-w-[150px]">{row.firstUser}</td><td className="px-8 py-4 text-center"><span className="px-3 py-1 bg-red-100 text-[#D91B2A] rounded-xl font-black">{row.totalImpact}x</span></td><td className="px-10 py-4 text-center"><button onClick={() => onLocateLineage(row.rootId)} className="px-4 py-2 bg-[#003DA5] text-white rounded-xl text-[9px] hover:bg-[#D91B2A] transition-all shadow-md">LOCALIZAR</button></td></tr>
+                    <tr key={idx} className="hover:bg-red-50 transition-colors"><td className="px-10 py-4 text-[#D91B2A] font-black">{row.rootId}</td><td className="px-8 py-4 text-gray-900 truncate max-w-[150px]">{fixEncoding(row.firstUser)}</td><td className="px-8 py-4 text-center"><span className="px-3 py-1 bg-red-100 text-[#D91B2A] rounded-xl font-black">{row.totalImpact}x</span></td><td className="px-10 py-4 text-center"><button onClick={() => onLocateLineage(row.rootId)} className="px-4 py-2 bg-[#003DA5] text-white rounded-xl text-[9px] hover:bg-[#D91B2A] transition-all shadow-md">LOCALIZAR</button></td></tr>
                   ))}
                   {stats.auditData.length === 0 && (<tr><td colSpan={4} className="px-10 py-20 text-center text-gray-400 italic font-black uppercase">Nenhuma reincidência operativa detectada</td></tr>)}
                 </tbody>
@@ -683,48 +849,88 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
             </div>
           </section>
 
-          {/* PÓDIUM SOLICITANTES (FIXADO NO FINAL COM ANIMAÇÕES) */}
-          <section className="bg-white p-10 rounded-[3rem] shadow-2xl border-4 border-white overflow-hidden relative mt-12 animate-in fade-in slide-in-from-bottom-4 duration-700">
-            <div className="flex items-center gap-6 mb-12 relative z-10">
-                <div className="bg-yellow-500 p-4 rounded-3xl animate-glow shadow-lg">
-                    <TrophyIcon className="w-8 h-8 text-white" />
+          {/* RANKING DE SOLICITANTES (PÓDIO FSJ) - MOVIDO PARA O FINAL */}
+          <section className="bg-white p-10 rounded-[3rem] shadow-2xl border-4 border-white overflow-hidden relative animate-in fade-in slide-in-from-bottom-8 duration-1000">
+            <div className="flex items-center justify-between mb-12 border-b pb-6">
+              <div className="flex items-center gap-4">
+                <div className="bg-yellow-500 p-3 rounded-2xl shadow-lg ring-4 ring-yellow-100">
+                  <TrophyIcon className="w-8 h-8 text-white animate-pulse" />
                 </div>
                 <div>
-                    <h3 className="text-2xl font-black text-gray-900 uppercase tracking-tighter">Ranking de Solicitantes (PÓDIO)</h3>
-                    <p className="text-[11px] font-black text-gray-500 uppercase tracking-widest mt-1">Volume por Analista FSJ</p>
+                  <h3 className="text-2xl font-black text-gray-900 uppercase tracking-tighter">Ranking de Solicitantes (FSJ)</h3>
+                  <p className="text-[10px] font-black text-gray-500 uppercase tracking-widest mt-1">Colaboradores que mais abrem chamados</p>
                 </div>
+              </div>
+              <div className="hidden md:block">
+                <span className="text-[10px] font-black bg-blue-50 text-[#003DA5] px-4 py-2 rounded-full border border-blue-100">FONTE: COLUNA USUÁRIO</span>
+              </div>
             </div>
-            <div className="flex flex-col md:flex-row items-end justify-center gap-6 md:gap-16 max-w-4xl mx-auto py-6">
-               {stats.podiumSolicitants[1] && (
-                 <div className="w-full md:w-1/4 flex flex-col items-center group mb-6 md:mb-0 animate-in fade-in slide-in-from-left-4 duration-500">
-                    <p className="text-[10px] font-black text-gray-900 uppercase mb-4 text-center truncate w-full">{stats.podiumSolicitants[1].name}</p>
-                    <div className="w-full h-24 bg-gradient-to-b from-slate-300 to-slate-500 rounded-t-[2rem] flex flex-col items-center justify-center border-t-4 border-slate-400 shadow-xl group-hover:scale-105 transition-transform">
-                        <span className="text-white text-3xl font-black">2º</span>
-                        <span className="text-[9px] font-black text-slate-900 bg-white/30 px-2 py-0.5 rounded-full mt-2">{stats.podiumSolicitants[1].count} Cases</span>
+            
+            <div className="flex flex-col md:flex-row items-end justify-center gap-8 md:gap-4 py-12 max-w-5xl mx-auto">
+              {stats.podiumSolicitants.length > 0 ? (
+                <>
+                  {/* 2º Lugar */}
+                  {stats.podiumSolicitants[1] && (
+                    <div className="flex flex-col items-center group w-full md:w-1/4 animate-in slide-in-from-left-8 duration-700 delay-200">
+                      <div className="text-center mb-6 truncate w-full px-2">
+                        <p className="text-sm font-black text-gray-800 uppercase leading-none">{fixEncoding(stats.podiumSolicitants[1].name)}</p>
+                      </div>
+                      <div className="w-full h-32 bg-gradient-to-b from-slate-200 to-slate-400 rounded-t-[2.5rem] flex flex-col items-center justify-center border-t-4 border-slate-300 shadow-xl relative group-hover:-translate-y-2 transition-transform duration-500">
+                        <MedalIcon className="w-10 h-10 text-slate-500 absolute -top-5 drop-shadow-md" />
+                        <span className="text-white text-4xl font-black italic">2º</span>
+                        <div className="mt-3 bg-white/40 px-3 py-1 rounded-full backdrop-blur-sm">
+                          <span className="text-[11px] font-black text-slate-900">{stats.podiumSolicitants[1].count} CASES</span>
+                        </div>
+                      </div>
                     </div>
-                 </div>
-               )}
-               {stats.podiumSolicitants[0] && (
-                 <div className="w-full md:w-1/3 flex flex-col items-center group scale-110 md:scale-125 z-20 mb-12 md:mb-0 animate-in zoom-in fade-in duration-1000">
-                    <p className="text-[11px] font-black text-gray-900 uppercase mb-6 text-center truncate w-full">{stats.podiumSolicitants[0].name}</p>
-                    <div className="w-full h-40 bg-gradient-to-b from-[#003DA5] to-blue-900 rounded-t-[2.5rem] flex flex-col items-center justify-center border-t-4 border-blue-950 shadow-2xl relative group-hover:scale-110 transition-transform">
-                       <span className="text-white text-5xl font-black italic">1º</span>
-                       <span className="text-[10px] font-black text-white bg-yellow-500 px-4 py-1 rounded-full mt-3 shadow-md">{stats.podiumSolicitants[0].count} Cases</span>
+                  )}
+                  
+                  {/* 1º Lugar */}
+                  {stats.podiumSolicitants[0] && (
+                    <div className="flex flex-col items-center group w-full md:w-1/3 z-10 animate-in slide-in-from-bottom-12 duration-1000">
+                      <div className="text-center mb-8 truncate w-full px-4">
+                        <p className="text-lg font-black text-[#003DA5] uppercase tracking-tighter leading-none">{fixEncoding(stats.podiumSolicitants[0].name)}</p>
+                      </div>
+                      <div className="w-full h-48 bg-gradient-to-b from-[#003DA5] to-blue-900 rounded-t-[3rem] flex flex-col items-center justify-center border-t-8 border-blue-950 shadow-[0_20px_50px_rgba(0,61,165,0.3)] relative group-hover:-translate-y-4 transition-transform duration-500">
+                        <div className="absolute -top-10">
+                          <TrophyIcon className="w-16 h-16 text-yellow-400 drop-shadow-[0_0_15px_rgba(250,204,21,0.6)] animate-bounce" />
+                        </div>
+                        <span className="text-white text-6xl font-black italic tracking-tighter mb-2">1º</span>
+                        <div className="bg-yellow-500 px-6 py-2 rounded-full shadow-lg border-2 border-yellow-300">
+                          <span className="text-[12px] font-extrabold text-white uppercase tracking-widest">{stats.podiumSolicitants[0].count} CASES</span>
+                        </div>
+                      </div>
                     </div>
-                 </div>
-               )}
-               {stats.podiumSolicitants[2] && (
-                 <div className="w-full md:w-1/4 flex flex-col items-center group animate-in fade-in slide-in-from-right-4 duration-500">
-                    <p className="text-[10px] font-black text-gray-900 uppercase mb-4 text-center truncate w-full">{stats.podiumSolicitants[2].name}</p>
-                    <div className="w-full h-20 bg-gradient-to-b from-orange-300 to-orange-500 rounded-t-[2rem] flex flex-col items-center justify-center border-t-4 border-orange-400 shadow-xl group-hover:scale-105 transition-transform">
-                       <span className="text-white text-2xl font-black">3º</span>
-                       <span className="text-[8px] font-black text-orange-950 bg-white/30 px-2 py-0.5 rounded-full mt-2">{stats.podiumSolicitants[2].count} Cases</span>
+                  )}
+                  
+                  {/* 3º Lugar */}
+                  {stats.podiumSolicitants[2] && (
+                    <div className="flex flex-col items-center group w-full md:w-1/4 animate-in slide-in-from-right-8 duration-700 delay-400">
+                      <div className="text-center mb-6 truncate w-full px-2">
+                        <p className="text-sm font-black text-gray-800 uppercase leading-none">{fixEncoding(stats.podiumSolicitants[2].name)}</p>
+                      </div>
+                      <div className="w-full h-24 bg-gradient-to-b from-orange-300 to-orange-500 rounded-t-[2.5rem] flex flex-col items-center justify-center border-t-4 border-orange-400 shadow-xl relative group-hover:-translate-y-1 transition-transform duration-500">
+                        <MedalIcon className="w-8 h-8 text-orange-700 absolute -top-4 opacity-70" />
+                        <span className="text-white text-3xl font-black italic">3º</span>
+                        <div className="mt-2 bg-white/40 px-3 py-1 rounded-full backdrop-blur-sm">
+                          <span className="text-[10px] font-black text-orange-950">{stats.podiumSolicitants[2].count} CASES</span>
+                        </div>
+                      </div>
                     </div>
-                 </div>
-               )}
+                  )}
+                </>
+              ) : (
+                <div className="flex flex-col items-center justify-center opacity-30 py-20 w-full border-4 border-dashed border-gray-100 rounded-[3rem]">
+                  <AlertCircle className="w-16 h-16 mb-4 text-gray-400" />
+                  <p className="text-sm font-black uppercase tracking-widest text-center">Dados insuficientes para o Ranking</p>
+                </div>
+              )}
             </div>
+            
+            {/* Background elements */}
+            <div className="absolute top-0 right-0 w-64 h-64 bg-blue-50 rounded-full blur-3xl -z-1 opacity-50" />
+            <div className="absolute bottom-0 left-0 w-64 h-64 bg-red-50 rounded-full blur-3xl -z-1 opacity-50" />
           </section>
-
         </div>
       )}
 
@@ -734,9 +940,55 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
            {stats.analystRanking.length === 0 ? (
              <div className="bg-white p-20 rounded-[2.5rem] shadow-xl text-center border-4 border-blue-50"><UsersIcon className="w-16 h-16 text-gray-200 mx-auto mb-6" /><h3 className="text-xl font-black uppercase text-gray-400">Sem dados de produtividade</h3></div>
            ) : (
-             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <div className="lg:col-span-2 bg-white p-8 rounded-[2.5rem] shadow-xl"><h3 className="text-xl font-black uppercase mb-8 flex items-center gap-3 text-[#003DA5] tracking-tight"><Target className="w-6 h-6" /> Produtividade e Agilidade por Analista</h3><div className="overflow-x-auto"><table className="w-full text-left font-black uppercase text-[10px]"><thead className="bg-gray-50 border-b"><tr><th className="px-4 py-3">Analista / Atendente</th><th className="px-4 py-3 text-center">Volume</th><th className="px-4 py-3 text-center">No Prazo</th><th className="px-4 py-3 text-center">Resolvidos</th><th className="px-4 py-3 text-center">Média SLA</th><th className="px-4 py-3 text-right">Aproveitamento</th></tr></thead><tbody className="divide-y divide-gray-100">{stats.analystRanking.map((u, i) => (<tr key={i} className="hover:bg-blue-50 transition-colors"><td className="px-4 py-4 text-gray-900">{u.name}</td><td className="px-4 py-4 text-center">{u.total}</td><td className="px-4 py-4 text-center text-emerald-700">{u.onTime}</td><td className="px-4 py-4 text-center text-[#003DA5]">{u.concluido}</td><td className="px-4 py-4 text-center text-gray-500">{u.avgSla}d</td><td className="px-4 py-4 text-right"><div className="flex items-center justify-end gap-2"><div className="w-20 h-1.5 bg-gray-100 rounded-full overflow-hidden"><div className="h-full bg-[#003DA5]" style={{ width: `${u.efficiency}%` }} /></div><span className="text-[#003DA5] min-w-[35px]">{u.efficiency}%</span></div></td></tr>))}</tbody></table></div></div>
-                <div className="space-y-6"><div className="bg-[#003DA5] p-10 rounded-[2.5rem] text-white shadow-xl relative overflow-hidden"><h4 className="text-[10px] font-black uppercase mb-4 tracking-[0.2em] text-blue-200">Analista Top Volume</h4><p className="text-2xl font-black italic">{stats.analystRanking[0]?.name || '-'}</p><p className="text-sm font-bold text-blue-100 mt-2">{stats.analystRanking[0]?.total || 0} Processados</p><Target className="absolute -right-4 -bottom-4 w-32 h-32 opacity-10" /></div><div className="bg-emerald-600 p-10 rounded-[2.5rem] text-white shadow-xl relative overflow-hidden"><h4 className="text-[10px] font-black uppercase mb-4 tracking-[0.2em] text-emerald-100">Destaque Agilidade</h4><p className="text-2xl font-black italic">{stats.analystRanking.length > 0 ? stats.analystRanking.slice().sort((a,b)=>Number(a.avgSla)-Number(b.avgSla))[0]?.name : '-'}</p><p className="text-sm font-bold text-emerald-50 mt-2">Recorde de {stats.analystRanking.length > 0 ? stats.analystRanking.slice().sort((a,b)=>Number(a.avgSla)-Number(b.avgSla))[0]?.avgSla : '0.0'} dias</p><ZapIcon className="absolute -right-4 -bottom-4 w-32 h-32 opacity-10" /></div></div>
+             <div className="flex flex-col gap-10">
+                <div className="bg-white p-8 rounded-[2.5rem] shadow-xl">
+                  <h3 className="text-xl font-black uppercase mb-8 flex items-center gap-3 text-[#003DA5] tracking-tight"><Target className="w-6 h-6" /> Produtividade e Agilidade por Analista (SOVOS)</h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left font-black uppercase text-[10px]">
+                      <thead className="bg-gray-50 border-b"><tr><th className="px-4 py-3">Analista / Atendente</th><th className="px-4 py-3 text-center">Volume</th><th className="px-4 py-3 text-center">No Prazo</th><th className="px-4 py-3 text-center">Resolvidos</th><th className="px-4 py-3 text-center">Média SLA</th><th className="px-4 py-3 text-right">Aproveitamento</th></tr></thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {stats.analystRanking.map((u, i) => (
+                          <tr key={i} className="hover:bg-blue-50 transition-colors">
+                            <td className="px-4 py-4 text-gray-900">{u.name}</td>
+                            <td className="px-4 py-4 text-center">{u.total}</td>
+                            <td className="px-4 py-4 text-center text-emerald-700">{u.onTime}</td>
+                            <td className="px-4 py-4 text-center text-[#003DA5]">{u.concluido}</td>
+                            <td className="px-4 py-4 text-center text-gray-500">{u.avgSla}d</td>
+                            <td className="px-4 py-4 text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                <div className="w-20 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                                  <div className="h-full bg-[#003DA5]" style={{ width: `${u.efficiency}%` }} />
+                                </div>
+                                <span className="text-[#003DA5] min-w-[35px]">{u.efficiency}%</span>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="bg-white p-8 rounded-[2.5rem] shadow-xl border-t-8 border-[#D91B2A]">
+                  <h3 className="text-xl font-black uppercase mb-8 flex items-center gap-3 text-[#D91B2A] tracking-tight"><BriefcaseIcon className="w-6 h-6" /> Ranking Completo de Solicitantes (FSJ)</h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left font-black uppercase text-[10px]">
+                      <thead className="bg-gray-50 border-b"><tr><th className="px-4 py-3">#</th><th className="px-4 py-3">Solicitante</th><th className="px-4 py-3 text-center">Volume de Cases</th><th className="px-4 py-3 text-right">Participação</th></tr></thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {stats.solicitantRanking.map((s, i) => (
+                          <tr key={i} className="hover:bg-red-50 transition-colors">
+                            <td className="px-4 py-4 font-black text-gray-400">{i + 1}º</td>
+                            <td className="px-4 py-4 text-gray-900 font-bold">{s.name}</td>
+                            <td className="px-4 py-4 text-center">{s.count}</td>
+                            <td className="px-4 py-4 text-right">
+                               <span className="px-3 py-1 bg-red-100 text-[#D91B2A] rounded-full">{s.share}%</span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
              </div>
            )}
         </div>
@@ -1185,106 +1437,174 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
         </div>
       )}
 
-      {/* DASHBOARD QUALIDADE - ATUALIZADO */}
+      {/* DASHBOARD QUALIDADE - REESTRUTURADO */}
       {activeTab === 'quality' && (
-        <div className="space-y-10 animate-in slide-in-from-right-10 duration-500">
-           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-              <section className="bg-white p-12 rounded-[3rem] shadow-2xl flex flex-col items-center justify-center text-center relative border-4 border-white">
-                  <div className="mb-10 w-full">
-                      <div className="flex justify-between items-start mb-4">
-                          <div className="text-left">
-                              <h4 className="text-[14px] font-black uppercase tracking-tight text-gray-900">QUALIDADE DA ENTREGA — SOVOS</h4>
-                              <p className="text-[10px] font-black text-gray-400 uppercase mt-1">Baseado nos motivos de devolução e retrabalho</p>
-                          </div>
-                          <div className="flex flex-col items-end">
-                              <div className={`flex items-center gap-1 px-3 py-1 rounded-full text-[10px] font-black ${Number(stats.rftIndex) >= 98 ? 'bg-emerald-100 text-emerald-700' : Number(stats.rftIndex) >= 95 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>
-                                  <Target className="w-3 h-3" />
-                                  {Number(stats.rftIndex) >= 98 ? 'META ATINGIDA' : Number(stats.rftIndex) >= 95 ? 'ALERTA' : 'ABAIXO DA META'} (≥98%)
-                              </div>
-                              <div className="flex items-center gap-1 mt-2">
-                                  <TrendIcon trend={stats.rftTrend as "UP" | "DOWN" | "STABLE"} />
-                                  <span className="text-[9px] font-black text-gray-500 uppercase">vs mês anterior</span>
-                              </div>
-                          </div>
-                      </div>
-                      <div className="h-px bg-gray-100 w-full mb-6" />
+        <div className="space-y-6 animate-in slide-in-from-right-10 duration-500">
+           
+           {/* LINHA 1: KPIs PRINCIPAIS */}
+           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-gray-100 flex flex-col items-center justify-center text-center group hover:shadow-md transition-all">
+                  <div className={`p-3 rounded-xl mb-4 transition-colors ${Number(stats.rftIndex) >= 98 ? 'bg-emerald-50 text-emerald-600 group-hover:bg-emerald-100' : 'bg-red-50 text-red-600 group-hover:bg-red-100'}`}>
+                    <Target className="w-6 h-6" />
                   </div>
+                  <h4 className="text-[14px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Qualidade (RFT)</h4>
+                  <div className="flex items-baseline gap-2">
+                    <span className={`text-[32px] font-bold ${Number(stats.rftIndex) >= 98 ? 'text-emerald-700' : 'text-red-700'}`}>{stats.rftIndex}%</span>
+                    <TrendIcon trend={stats.rftTrend as "UP" | "DOWN" | "STABLE"} />
+                  </div>
+                  <div className={`mt-2 px-4 py-0.5 rounded-full text-[10px] font-bold uppercase flex items-center gap-1.5 ${Number(stats.rftIndex) >= 98 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                    <div className={`w-1.5 h-1.5 rounded-full ${Number(stats.rftIndex) >= 98 ? 'bg-emerald-500' : 'bg-red-500'}`} />
+                    {Number(stats.rftIndex) >= 98 ? 'Acima da Meta' : 'Abaixo da Meta'}
+                  </div>
+                  <p className="text-[11px] font-medium text-gray-400 mt-2 italic">Meta de qualidade (RFT): ≥ 98%</p>
+              </div>
 
-                  <div className="relative w-72 h-72">
+              <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-gray-100 flex flex-col items-center justify-center text-center group hover:shadow-md transition-all">
+                  <div className="p-3 bg-indigo-50 rounded-xl mb-4 group-hover:bg-indigo-100 transition-colors">
+                    <CheckCircle2 className="w-6 h-6 text-indigo-600" />
+                  </div>
+                  <h4 className="text-[14px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Qualidade Total</h4>
+                  <span className="text-[32px] font-bold text-[#111827]">
+                    {((stats.totalConcluidos / (stats.validRecordsCount || 1)) * 100).toFixed(1)}%
+                  </span>
+                  <p className="text-[12px] font-medium text-indigo-600 uppercase mt-2">Efetividade</p>
+              </div>
+
+              <div 
+                onClick={() => onFilterAction('recurrence', 'RETRABALHO')}
+                className="bg-white p-6 rounded-[2rem] shadow-sm border border-gray-100 flex flex-col items-center justify-center text-center group hover:shadow-md transition-all cursor-pointer"
+              >
+                  <div className="p-3 bg-orange-50 rounded-xl mb-4 group-hover:bg-orange-100 transition-colors">
+                    <RotateCcwIcon className="w-6 h-6 text-orange-600" />
+                  </div>
+                  <h4 className="text-[14px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Retrabalho</h4>
+                  <span className="text-[32px] font-bold text-[#111827]">{stats.totalRetrabalho}</span>
+                  <p className="text-[12px] font-medium text-orange-600 uppercase mt-2">Volume Bruto</p>
+              </div>
+
+              <div className={`p-6 rounded-[2rem] shadow-sm border flex flex-col items-center justify-center text-center transition-all ${stats.reworkAlert ? 'bg-red-50 border-red-100' : 'bg-emerald-50 border-emerald-100'}`}>
+                  <div className={`p-3 rounded-xl mb-4 ${stats.reworkAlert ? 'bg-red-100' : 'bg-emerald-100'}`}>
+                    {stats.reworkAlert ? <AlertTriangle className="w-6 h-6 text-red-600" /> : <CheckCircle className="w-6 h-6 text-emerald-600" />}
+                  </div>
+                  <h4 className={`text-[14px] font-semibold uppercase tracking-wide mb-1 ${stats.reworkAlert ? 'text-red-500' : 'text-emerald-500'}`}>Diagnóstico</h4>
+                  <span className={`text-[28px] font-bold ${stats.reworkAlert ? 'text-red-900' : 'text-emerald-900'}`}>
+                    {stats.reworkAlert ? 'ALERTA' : 'CONFORME'}
+                  </span>
+                  <p className={`text-[11px] font-bold uppercase mt-2 ${stats.reworkAlert ? 'text-red-700' : 'text-emerald-700'}`}>
+                    Meta: ≤ 5% ({stats.reworkRate.toFixed(1)}%)
+                  </p>
+              </div>
+           </div>
+
+            <div className="bg-[#111827] p-6 rounded-[2rem] border-l-[6px] border-amber-500 shadow-lg">
+              <p className="text-[16px] font-bold text-[#F9FAFB] uppercase tracking-tight flex items-center gap-3">
+                <ZapIcon className="w-5 h-5 text-amber-500" />
+                RFT (Resolução na primeira interação): {stats.rftIndex}% | Retrabalho: {stats.reworkRate.toFixed(1)}%
+              </p>
+              <div className="flex items-center justify-between mt-3">
+                <p className="text-[11px] font-medium text-gray-400 uppercase tracking-wider italic">{stats.periodRef}</p>
+                <div className="flex items-center gap-2 px-3 py-1 bg-white/5 rounded-lg border border-white/10">
+                  <Filter className="w-3 h-3 text-gray-500" />
+                  <span className="text-[11px] font-bold text-gray-400 uppercase tracking-widest">Base Filtrada</span>
+                </div>
+              </div>
+            </div>
+
+           {/* LINHA 2: ANÁLISE DETALHADA */}
+           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <section className="bg-white p-6 rounded-[2.5rem] shadow-sm border border-gray-100 flex flex-col items-center justify-center relative overflow-hidden">
+                  <div className="absolute top-6 left-6">
+                    <h4 className="text-[15px] font-semibold text-[#111827] uppercase tracking-wide">Visão Analítica RFT</h4>
+                  </div>
+                  
+                  <div className="relative w-56 h-56 mt-4">
                       <ResponsiveContainer width="100%" height="100%">
                           <PieChart>
                               <Pie 
                                 data={[{ value: Number(stats.rftIndex) }, { value: 100 - Number(stats.rftIndex) }]} 
-                                innerRadius={85} 
-                                outerRadius={120} 
+                                innerRadius={70} 
+                                outerRadius={90} 
                                 startAngle={90} 
                                 endAngle={450} 
                                 dataKey="value" 
                                 stroke="none"
                               >
-                                  <RechartsCell fill={Number(stats.rftIndex) >= 98 ? '#064e3b' : Number(stats.rftIndex) >= 95 ? '#92400e' : '#991b1b'} />
-                                  <RechartsCell fill="#f1f5f9" />
+                                  <RechartsCell fill={Number(stats.rftIndex) >= 98 ? '#059669' : Number(stats.rftIndex) >= 95 ? '#D97706' : '#DC2626'} />
+                                  <RechartsCell fill="#F3F4F6" />
                               </Pie>
                           </PieChart>
                       </ResponsiveContainer>
                       <div className="absolute inset-0 flex flex-col items-center justify-center">
-                          <span className="text-7xl font-black leading-none text-gray-900">{stats.rftIndex}%</span>
-                          <span className="text-[10px] font-black text-gray-600 uppercase mt-2 max-w-[220px]">
-                              {stats.concluidosSemRetrabalho} de {stats.rftBase} casos resolvidos sem retrabalho
+                          <span className={`text-[36px] font-bold ${Number(stats.rftIndex) >= 98 ? 'text-emerald-600' : 'text-red-600'}`}>{stats.rftIndex}%</span>
+                          <span className={`text-[10px] font-bold uppercase mt-1 ${Number(stats.rftIndex) >= 98 ? 'text-emerald-500' : 'text-red-500'}`}>
+                            {Number(stats.rftIndex) >= 98 ? 'Meta Atingida' : 'Abaixo da Meta'}
                           </span>
-                          <span className="text-[9px] font-bold text-gray-400 uppercase mt-1">Período: {stats.periodRef}</span>
                       </div>
                   </div>
-
-                   <div className="grid grid-cols-2 gap-4 w-full mt-12">
-                      <div className="bg-red-800 p-6 rounded-3xl shadow-xl text-left group hover:bg-red-900 transition-colors">
-                          <div className="flex items-center gap-2 mb-2">
-                              <RotateCcwIcon className="w-4 h-4 text-white" />
-                              <span className="text-[10px] font-black text-white uppercase tracking-wider">PRINCIPAL CAUSA DE REINCIDÊNCIA</span>
-                          </div>
-                          <p className="text-[11px] font-black text-white uppercase line-clamp-2 leading-tight">{stats.topReincReason}</p>
-                      </div>
-                      <div className="bg-blue-700 p-6 rounded-3xl shadow-xl text-left group hover:bg-blue-800 transition-colors">
-                          <div className="flex items-center gap-2 mb-2">
-                              <AlertTriangle className="w-4 h-4 text-white" />
-                              <span className="text-[10px] font-black text-white uppercase tracking-wider">PRINCIPAL CAUSA DE DEVOLUÇÃO</span>
-                          </div>
-                          <p className="text-[11px] font-black text-white uppercase line-clamp-2 leading-tight">{stats.topDevolReason}</p>
-                      </div>
+                  
+                  <div className="mt-4 text-center">
+                    <p className="text-[12px] font-medium text-gray-500 uppercase">
+                      {stats.concluidosPerfeitos} de {stats.rftBase} entregues em conformidade RFT
+                    </p>
                   </div>
-
-                  {stats.qualityInconsistency && (
-                    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 animate-pulse flex items-center gap-2 bg-amber-50 border border-amber-200 px-4 py-2 rounded-xl text-amber-800">
-                        <AlertTriangle className="w-4 h-4" />
-                        <span className="text-[8px] font-black uppercase">Inconsistência Operativa Detectada</span>
-                    </div>
-                  )}
               </section>
 
-              <section className="bg-[#1e293b] p-12 rounded-[3rem] shadow-2xl text-white relative overflow-hidden flex flex-col">
-                  <div className="flex items-center justify-between mb-12">
-                      <h3 className="text-2xl font-black uppercase flex items-center gap-4 tracking-tighter">
-                        <ClipboardCheck className="w-10 h-10 text-emerald-400" /> Funil de Resolução Completo
-                      </h3>
-                      <p className="text-[10px] font-black text-white/90 uppercase">Métricas Absolutas</p>
+              <div className="grid grid-cols-1 gap-4">
+                  <div className="bg-[#991b1b] p-6 rounded-[2rem] shadow-sm flex flex-col justify-between border-b-4 border-[#450a0a]">
+                      <div className="flex items-center gap-3 mb-4">
+                          <History className="w-5 h-5 text-[#F9FAFB] opacity-80" />
+                          <span className="text-[14px] font-semibold text-[#F9FAFB] uppercase tracking-wide">Causa: Reincidência</span>
+                      </div>
+                      <p className="text-[14px] font-bold text-[#F9FAFB] uppercase leading-tight line-clamp-2 italic opacity-90">{stats.topReincReason}</p>
+                      <div className="mt-4 flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-red-200 uppercase opacity-60">Destaque Crítico</span>
+                        <TrendingDown className="w-4 h-4 text-red-200" />
+                      </div>
                   </div>
-                  <div className="space-y-6 relative z-10 flex-grow">
-                      {stats.funnel.map((item, idx) => {
+                  <div className="bg-[#1e3a8a] p-6 rounded-[2rem] shadow-sm flex flex-col justify-between border-b-4 border-[#172554]">
+                      <div className="flex items-center gap-3 mb-4">
+                          <AlertTriangle className="w-5 h-5 text-[#F9FAFB] opacity-80" />
+                          <span className="text-[14px] font-semibold text-[#F9FAFB] uppercase tracking-wide">Causa: Devolução</span>
+                      </div>
+                      <p className="text-[14px] font-bold text-[#F9FAFB] uppercase leading-tight line-clamp-2 italic opacity-90">{stats.topDevolReason}</p>
+                      <div className="mt-4 flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-blue-200 uppercase opacity-60">Monitoramento</span>
+                        <ActivityIcon className="w-4 h-4 text-blue-200" />
+                      </div>
+                  </div>
+              </div>
+           </div>
+
+           {/* LINHA 3: FUNIS DE RESOLUÇÃO E QUALIDADE */}
+           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 relative z-10 transition-all">
+               <section className="bg-white p-6 rounded-[2.5rem] shadow-sm border border-gray-100 flex flex-col">
+                  <div className="flex items-center gap-4 mb-6 border-b border-gray-50 pb-4">
+                    <div className="p-2 bg-blue-50 rounded-lg">
+                      <LayersIcon className="w-5 h-5 text-blue-600" />
+                    </div>
+                    <div>
+                      <h3 className="text-[16px] font-bold text-[#111827] uppercase tracking-tight leading-none">Funil Operacional</h3>
+                      <p className="text-[11px] font-medium text-gray-400 uppercase mt-1">Status de Fluxo</p>
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-6 flex-grow">
+                      {stats.operationalFunnel.map((item, idx) => {
                           const maxVal = stats.validRecordsCount || 1;
                           const percent = (item.value / maxVal) * 100;
                           return (
                             <div key={idx} className="space-y-2 group">
                                 <div className="flex justify-between items-end">
                                     <div className="flex flex-col">
-                                        <span className="text-[11px] font-black uppercase text-blue-100 leading-none">{item.step}</span>
-                                        <span className="text-[8px] font-black text-white/70 uppercase mt-1">{item.label}</span>
+                                        <span className="text-[11px] font-bold uppercase text-gray-400 leading-none mb-1">{item.step}</span>
+                                        <span className="text-[15px] font-bold text-[#111827] uppercase tracking-tight">{item.label}</span>
                                     </div>
                                     <div className="text-right">
-                                        <span className="text-lg font-black block leading-none">{item.value}</span>
-                                        <span className="text-[11px] font-black text-white">{percent.toFixed(1)}%</span>
+                                        <span className="text-[28px] font-bold block leading-none text-[#111827] mb-1">{item.value}</span>
+                                        <span className="text-[11px] font-bold text-gray-400">{percent.toFixed(1)}%</span>
                                     </div>
                                 </div>
-                                <div className="h-5 bg-white/5 rounded-full overflow-hidden p-1 border border-white/10 group-hover:border-white/20 transition-all">
+                                <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
                                     <div 
                                       className={`h-full rounded-full transition-all duration-1000 ${item.color}`} 
                                       style={{ width: `${Math.max(2, percent)}%` }} 
@@ -1294,8 +1614,55 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                           );
                       })}
                   </div>
-                  <Target className="absolute -right-12 -bottom-12 w-80 h-80 opacity-[0.03] text-white" />
-              </section>
+               </section>
+
+               <section className="bg-white p-6 rounded-[2.5rem] shadow-sm border border-gray-100 flex flex-col">
+                  <div className="flex items-center gap-4 mb-6 border-b border-gray-50 pb-4">
+                    <div className="p-2 bg-emerald-50 rounded-lg">
+                      <ClipboardCheck className="w-5 h-5 text-emerald-600" />
+                    </div>
+                    <div>
+                      <h3 className="text-[16px] font-bold text-[#111827] uppercase tracking-tight leading-none">Funil de Qualidade</h3>
+                      <p className="text-[11px] font-medium text-gray-400 uppercase mt-1">Conformidade RFT</p>
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-6 flex-grow">
+                      {stats.qualityFunnel.map((item, idx) => {
+                          const maxVal = stats.totalConcluidos || 1;
+                          const percent = (item.value / maxVal) * 100;
+                          const isRework = item.label === 'PROCESSAMENTO COM RETRABALHO';
+                          return (
+                            <div 
+                              key={idx} 
+                              className={`space-y-2 group transition-all ${isRework ? 'cursor-pointer p-2 -m-2 rounded-xl hover:bg-gray-50' : ''}`}
+                              onClick={isRework ? () => onFilterAction('recurrence', 'RETRABALHO') : undefined}
+                              title={isRework ? "Ver cases com retrabalho" : ""}
+                            >
+                                <div className="flex justify-between items-end">
+                                    <div className="flex flex-col">
+                                        <span className="text-[11px] font-bold uppercase text-gray-400 leading-none mb-1">{item.step}</span>
+                                        <span className="text-[15px] font-bold text-[#111827] uppercase tracking-tight flex items-center gap-2">
+                                          {item.label}
+                                          {isRework && <ExternalLink className="w-3 h-3 text-gray-300 group-hover:text-amber-500" />}
+                                        </span>
+                                    </div>
+                                    <div className="text-right">
+                                        <span className="text-[28px] font-bold block leading-none text-[#111827] mb-1">{item.value}</span>
+                                        <span className="text-[11px] font-bold text-gray-400">{percent.toFixed(1)}%</span>
+                                    </div>
+                                </div>
+                                <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+                                    <div 
+                                      className={`h-full rounded-full transition-all duration-1000 ${item.color}`} 
+                                      style={{ width: `${Math.max(2, percent)}%` }} 
+                                    />
+                                </div>
+                            </div>
+                          );
+                      })}
+                  </div>
+               </section>
            </div>
         </div>
       )}

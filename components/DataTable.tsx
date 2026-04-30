@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { TicketRecord, TicketStatus, MuralTreatment } from '../types';
-import { Trash2, Edit3, ChevronDown, ChevronUp, Clock, ShieldCheck, Timer, Calendar, CheckCircle2, AlertCircle, MessageSquare, StickyNote, Link2, Plus, Search } from 'lucide-react';
+import { Trash2, Edit3, ChevronDown, ChevronUp, Clock, ShieldCheck, Timer, Calendar, CheckCircle2, AlertCircle, MessageSquare, StickyNote, Link2, Plus, Search, ArrowUpRight } from 'lucide-react';
 import { differenceInDays, parseISO, startOfDay } from 'date-fns';
 
 interface DataTableProps {
@@ -10,7 +10,9 @@ interface DataTableProps {
   onEdit: (record: TicketRecord) => void;
   onOpenCase?: (caseId: string) => void;
   onAddTreatment?: (treatment: MuralTreatment) => void;
+  onSendToMural?: (record: TicketRecord, createTreatment?: boolean) => void;
   currentUserName?: string;
+  isRetrabalhoFilterActive?: boolean;
 }
 
 const DataTable: React.FC<DataTableProps> = ({ 
@@ -19,9 +21,54 @@ const DataTable: React.FC<DataTableProps> = ({
   onEdit, 
   onOpenCase, 
   onAddTreatment,
-  currentUserName 
+  onSendToMural,
+  currentUserName,
+  isRetrabalhoFilterActive
 }) => {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  const [sortField, setSortField] = useState<'openingDate' | 'caseId' | 'user' | 'externalUser' | 'status'>('openingDate');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+
+  const getSLAPriority = (r: TicketRecord) => {
+    const today = startOfDay(new Date());
+    const openDate = startOfDay(parseISO(r.openingDate));
+    const finalDate = r.returnDate ? startOfDay(parseISO(r.returnDate)) : today;
+    const diffDays = Math.abs(differenceInDays(finalDate, openDate));
+    
+    if (diffDays > 9) return 3; // CRÍTICO
+    if (diffDays > 5) return 2; // ALERTA
+    return 1; // NO PRAZO
+  };
+
+  const toggleSort = (field: 'openingDate' | 'caseId' | 'user' | 'externalUser' | 'status') => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('desc');
+    }
+  };
+
+  const sortedRecords = [...records].sort((a, b) => {
+    let comparison = 0;
+    
+    if (sortField === 'openingDate') {
+      comparison = parseISO(a.openingDate).getTime() - parseISO(b.openingDate).getTime();
+    } else {
+      const valA = (a[sortField] || '').toString().toLowerCase();
+      const valB = (b[sortField] || '').toString().toLowerCase();
+      comparison = valA.localeCompare(valB);
+    }
+
+    if (comparison === 0) {
+      // Secondary sort by SLA
+      const slaA = getSLAPriority(a);
+      const slaB = getSLAPriority(b);
+      comparison = slaA - slaB; // Ascending by priority
+    }
+
+    return sortDirection === 'asc' ? comparison : -comparison;
+  });
 
   const toggleRow = (id: string) => {
     const newExpanded = new Set(expandedRows);
@@ -48,26 +95,65 @@ const DataTable: React.FC<DataTableProps> = ({
   };
 
   return (
-    <div className="bg-white rounded-[2.5rem] shadow-2xl border border-gray-200 overflow-hidden animate-in slide-in-from-bottom-4 duration-700">
+    <div className="space-y-4">
+      {isRetrabalhoFilterActive && (
+        <div className="bg-red-50 border-2 border-red-200 p-4 rounded-3xl flex items-center gap-3 animate-in fade-in slide-in-from-top-4 duration-500">
+           <div className="p-2 bg-red-100 rounded-xl">
+             <AlertCircle className="w-5 h-5 text-red-700" />
+           </div>
+           <div>
+             <p className="text-[10px] font-black text-red-900 uppercase tracking-widest">Filtro Aplicado</p>
+             <p className="text-sm font-black text-red-700 uppercase">Devolvidos / Retrabalho</p>
+           </div>
+        </div>
+      )}
+      <div className="bg-white rounded-[2.5rem] shadow-2xl border border-gray-200 overflow-hidden animate-in slide-in-from-bottom-4 duration-700">
       <div className="overflow-x-auto">
         <table className="w-full text-left text-xs border-collapse min-w-[1200px]">
           <thead className="bg-[#003DA5] text-white">
             <tr className="font-black uppercase tracking-normal text-[10px]">
               <th className="px-6 py-5 w-10"></th>
-              <th className="px-4 py-5 text-white">CASE / Chamado</th>
+              <th onClick={() => toggleSort('caseId')} className="px-4 py-5 text-white cursor-pointer hover:bg-white/10 transition-colors">
+                <div className="flex items-center gap-1">
+                  CASE / Chamado
+                  {sortField === 'caseId' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
+                </div>
+              </th>
               <th className="px-4 py-5 text-white">Monitor SLA</th>
-              <th className="px-4 py-5 text-white">Abertura</th>
+              <th onClick={() => toggleSort('openingDate')} className="px-4 py-5 text-white cursor-pointer hover:bg-white/10 transition-colors">
+                <div className="flex items-center gap-1">
+                  Abertura
+                  {sortField === 'openingDate' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
+                </div>
+              </th>
               <th className="px-4 py-5 text-white">Retorno</th>
-              <th className="px-4 py-5 text-white">FSJ (Solicitante)</th>
-              <th className="px-6 py-5 text-white">Analista Sovos</th>
+              <th onClick={() => toggleSort('externalUser')} className="px-4 py-5 text-white cursor-pointer hover:bg-white/10 transition-colors">
+                <div className="flex items-center gap-1">
+                  FSJ (Solicitante)
+                  {sortField === 'externalUser' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
+                </div>
+              </th>
+              <th onClick={() => toggleSort('user')} className="px-6 py-5 text-white cursor-pointer hover:bg-white/10 transition-colors">
+                <div className="flex items-center gap-1">
+                  Analista Sovos
+                  {sortField === 'user' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
+                </div>
+              </th>
               <th className="px-6 py-5 text-center text-white">Ações</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {records.map((r) => {
+            {sortedRecords.map((r) => {
               const isExpanded = expandedRows.has(r.id);
               const sla = getSLAInfo(r);
-              const statusColors = { ABERTO: 'bg-blue-700 text-white', DEVOLVIDO: 'bg-amber-700 text-white', CONCLUIDO: 'bg-emerald-800 text-white' };
+              const statusColors: Record<string, string> = { 
+                'ABERTO': 'bg-blue-700 text-white', 
+                'DEVOLVIDO': 'bg-amber-700 text-white', 
+                'CONCLUÍDO': 'bg-emerald-800 text-white',
+                'EM ANDAMENTO': 'bg-indigo-700 text-white',
+                'EM ANALISE': 'bg-indigo-700 text-white',
+                'AGUARDANDO': 'bg-amber-600 text-white'
+              };
               const isCurrentUser = currentUserName && r.externalUser?.toUpperCase() === currentUserName.toUpperCase();
 
               return (
@@ -81,6 +167,19 @@ const DataTable: React.FC<DataTableProps> = ({
                             <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase ${statusColors[r.status]}`}>
                               {r.status}
                             </span>
+                            {(() => {
+                              const obs = (r.observations || '').toLowerCase();
+                              const matches = obs.match(/devolvido|reaberto/g) || [];
+                              const count = matches.length + (r.status === 'DEVOLVIDO' ? 1 : 0);
+                              if (count > 0) {
+                                return (
+                                  <span className="bg-red-50 text-red-600 px-1.5 py-0.5 rounded text-[7px] font-black uppercase tracking-widest border border-red-100">
+                                    Retrabalho {count > 1 ? `(${count})` : ''}
+                                  </span>
+                                );
+                              }
+                              return null;
+                            })()}
                             {isCurrentUser && (
                               <span className="bg-emerald-600 text-white px-1.5 py-0.5 rounded text-[7px] font-black uppercase tracking-widest">Meu Registro</span>
                             )}
@@ -191,6 +290,18 @@ const DataTable: React.FC<DataTableProps> = ({
                                 >
                                   <Link2 className="w-4 h-4" /> Vincular reincidência
                                 </button>
+                                <button 
+                                  onClick={() => onSendToMural?.(r, false)}
+                                  className="px-4 py-2 bg-slate-100 text-slate-700 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-200 transition-all flex items-center gap-2 active:scale-95 shadow-sm border border-slate-200"
+                                >
+                                  <MessageSquare className="w-4 h-4" /> Enviar ao Mural
+                                </button>
+                                <button 
+                                  onClick={() => onSendToMural?.(r, true)}
+                                  className="px-4 py-2 bg-indigo-50 text-indigo-700 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-100 transition-all flex items-center gap-2 active:scale-95 shadow-sm border border-indigo-200"
+                                >
+                                  <ArrowUpRight className="w-4 h-4" /> Enviar e Criar Tratativa
+                                </button>
                               </div>
                            </div>
                            <div className="space-y-6">
@@ -239,6 +350,7 @@ const DataTable: React.FC<DataTableProps> = ({
         </table>
       </div>
     </div>
+  </div>
   );
 };
 
