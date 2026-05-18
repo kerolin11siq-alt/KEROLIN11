@@ -2,108 +2,197 @@
   "entities": {
     "User": {
       "title": "User",
-      "description": "System user profile",
+      "description": "User presence and profile information",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
-        "name": { "type": "string" }
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "isActive": { "type": "boolean" },
+        "photoURL": { "type": "string" },
+        "lastSeen": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "isOnline": { "type": "boolean" }
       },
-      "required": ["id", "name"]
+      "required": ["id", "name", "email", "isActive", "createdAt"]
     },
-    "Ticket": {
-      "title": "Ticket (Case)",
-      "description": "Original case record from SOVOS or manual entry",
+    "TicketRecord": {
+      "title": "TicketRecord",
+      "description": "A ticket or case record",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
         "caseId": { "type": "string" },
-        "type": { "type": "string" },
-        "openingDate": { "type": "string" },
+        "type": { "type": "string", "enum": ["PRODUÇÃO", "PROJETO"] },
+        "previousCaseId": { "type": "string" },
+        "openingDate": { "type": "string", "format": "date" },
+        "returnDate": { "type": "string", "format": "date" },
+        "conclusionDate": { "type": "string", "format": "date" },
         "user": { "type": "string" },
         "externalUser": { "type": "string" },
+        "subject": { "type": "string" },
         "description": { "type": "string" },
         "scenarios": { "type": "string" },
         "observations": { "type": "string" },
         "status": { "type": "string" },
         "creatorUser": { "type": "string" },
-        "createdAt": { "type": "string" },
-        "origin": { "type": "string" }
-      }
-    },
-    "CaseKnowledge": {
-      "title": "Case Knowledge",
-      "description": "Analytical layers for a specific case",
-      "type": "object",
-      "properties": {
-        "caseId": { "type": "string" },
-        "lastUpdated": { "type": "string" }
-      }
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" },
+        "createdByEmail": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "updatedByEmail": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "origin": { "type": "string", "enum": ["manual", "mural", "workflow", "import"] },
+        "muralPostId": { "type": "string" },
+        "slaStartDate": { "type": "string", "format": "date" },
+        "matchReason": { "type": "string" },
+        "normalizedCategory": { "type": "string" },
+        "isRecurrent": { "type": "boolean" },
+        "isFormalRecurrent": { "type": "boolean" },
+        "criticalityScore": { "type": "number" }
+      },
+      "required": ["id", "caseId", "type", "openingDate", "user", "status", "createdAt", "createdBy", "createdByEmail", "updatedBy", "updatedByEmail", "updatedAt", "origin"]
     },
     "MuralPost": {
-      "title": "Mural Post",
-      "description": "Operational post in the mural",
+      "title": "MuralPost",
+      "description": "A post in the operational mural",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
         "userId": { "type": "string" },
         "userName": { "type": "string" },
-        "createdAt": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" },
+        "createdByEmail": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "updatedByEmail": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" },
         "type": { "type": "string" },
         "title": { "type": "string" },
         "description": { "type": "string" },
         "subject": { "type": "string" },
         "criticality": { "type": "string" },
-        "status": { "type": "string" }
-      }
-    },
-    "MuralTreatment": {
-      "title": "Mural Treatment",
-      "description": "Operational follow-up for a post or case",
-      "type": "object",
-      "properties": {
-        "id": { "type": "string" },
-        "title": { "type": "string" },
-        "description": { "type": "string" },
-        "responsible": { "type": "string" },
         "status": { "type": "string" },
-        "priority": { "type": "string" }
-      }
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "mentions": { "type": "array", "items": { "type": "string" } },
+        "caseId": { "type": "string" },
+        "isHighlighted": { "type": "boolean" },
+        "isPinned": { "type": "boolean" },
+        "isArchived": { "type": "boolean" },
+        "isRemoved": { "type": "boolean" },
+        "removedAt": { "type": "string", "format": "date-time" },
+        "removedBy": { "type": "string" },
+        "reincidencePostId": { "type": "string" },
+        "reincidenceCaseId": { "type": "string" },
+        "comments": { "type": "array", "items": { "$ref": "#/entities/MuralComment" } }
+      },
+      "required": ["id", "userId", "userName", "createdAt", "createdBy", "createdByEmail", "updatedBy", "updatedByEmail", "updatedAt", "type", "title", "description", "subject", "criticality", "status", "tags", "mentions", "comments"]
     },
-    "MuralNotification": {
-      "title": "Mural Notification",
-      "description": "Notification for mentions or updates",
+    "MuralComment": {
+      "title": "MuralComment",
+      "description": "A comment in a mural post",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
         "userId": { "type": "string" },
-        "read": { "type": "boolean" }
-      }
+        "userName": { "type": "string" },
+        "content": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" },
+        "createdByEmail": { "type": "string" }
+      },
+      "required": ["id", "userId", "userName", "content", "createdAt", "createdBy", "createdByEmail"]
+    },
+    "MuralTreatment": {
+      "title": "MuralTreatment",
+      "description": "A treatment linked to a mural post",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "mural_post_id": { "type": "string" },
+        "case_numero": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "subject": { "type": "string" },
+        "responsible": { "type": "string" },
+        "status": { "type": "string" },
+        "priority": { "type": "string" },
+        "deadline": { "type": "string", "format": "date" },
+        "origin": { "type": "string" },
+        "usuario_criador": { "type": "string" },
+        "criado_em": { "type": "string", "format": "date-time" },
+        "atualizado_em": { "type": "string", "format": "date-time" },
+        "encerrado_em": { "type": "string", "format": "date-time" },
+        "observacoes_internas": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "createdByEmail": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "updatedByEmail": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "description", "responsible", "status", "priority", "deadline", "origin", "usuario_criador", "criado_em", "atualizado_em", "createdBy", "createdByEmail", "updatedBy", "updatedByEmail", "updatedAt"]
+    },
+    "MuralNotification": {
+      "title": "MuralNotification",
+      "description": "User notification for mural activity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "authorName": { "type": "string" },
+        "postId": { "type": "string" },
+        "postTitle": { "type": "string" },
+        "type": { "type": "string", "enum": ["mention", "comment", "treatment"] },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "authorName", "postId", "postTitle", "type", "read", "createdAt"]
+    },
+    "KnowledgeBase": {
+      "title": "KnowledgeBase",
+      "description": "The case knowledge base",
+      "type": "object",
+      "properties": {
+        "version": { "type": "string" },
+        "entries": { "type": "object" },
+        "clusters": { "type": "object" },
+        "patterns": { "type": "object" }
+      },
+      "required": ["version", "entries", "clusters", "patterns"]
     }
   },
   "firestore": {
-    "users": {
+    "/users/{userId}": {
       "schema": "User",
-      "description": "Global user registry"
+      "description": "Registered users and their presence"
     },
-    "tickets": {
-      "schema": "Ticket",
-      "description": "Historical cases and ticket records"
+    "/tickets/{ticketId}": {
+      "schema": "TicketRecord",
+      "description": "Cases and ticket records"
     },
-    "caseKnowledge": {
-      "schema": "CaseKnowledge",
-      "description": "Analytical insights per case"
-    },
-    "muralPosts": {
+    "/muralPosts/{postId}": {
       "schema": "MuralPost",
-      "description": "Real-time operational communication"
+      "description": "Mural posts"
     },
-    "treatments": {
+    "/treatments/{treatmentId}": {
       "schema": "MuralTreatment",
-      "description": "Active operational treatments"
+      "description": "Treatments for mural posts"
     },
-    "notifications": {
+    "/notifications/{notificationId}": {
       "schema": "MuralNotification",
       "description": "User notifications"
+    },
+    "/knowledgeBase/version_1": {
+      "schema": "KnowledgeBase",
+      "description": "Global knowledge base document"
+    },
+    "/configs/migration": {
+      "schema": { "type": "object", "properties": { "status": { "type": "string" } } },
+      "description": "Migration configuration"
+    },
+    "/test/connection": {
+      "schema": { "type": "object" },
+      "description": "Connection test document"
     }
   }
 }

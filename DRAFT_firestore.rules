@@ -1,18 +1,19 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 0. Global Safety Net
+    // 0. Default Deny
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Helpers
+    // 1. Global Helpers
     function isSignedIn() {
       return request.auth != null;
     }
     
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    function isEmailVerified() {
+      // Mandating verified emails for security
+      return request.auth.token.email_verified == true;
     }
 
     function incoming() {
@@ -23,54 +24,95 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // 1. Users Collection
-    match /users/{userId} {
-      allow get: if isSignedIn();
-      allow list: if isSignedIn(); // Open to search for mentions
-      allow create: if isSignedIn() && request.auth.uid == userId;
-      allow update: if isSignedIn() && request.auth.uid == userId 
-                     && incoming().diff(existing()).affectedKeys().hasOnly(['name']);
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    // 2. Tickets (Cases)
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Entity Validations
+    function isValidTicket(data) {
+      return data.keys().hasAll(['id', 'caseId', 'type', 'openingDate', 'user', 'status', 'createdAt', 'createdBy', 'createdByEmail', 'updatedBy', 'updatedByEmail', 'updatedAt', 'origin'])
+        && data.id is string && data.id.size() <= 128
+        && data.caseId is string && data.caseId.size() <= 128
+        && data.type in ['PRODUÇÃO', 'PROJETO']
+        && data.status is string
+        && data.createdAt is string
+        && data.createdBy == request.auth.uid;
+    }
+
+    function isValidMuralPost(data) {
+      return data.keys().hasAll(['id', 'userId', 'userName', 'createdAt', 'createdBy', 'createdByEmail', 'updatedBy', 'updatedByEmail', 'updatedAt', 'type', 'title', 'description', 'subject', 'criticality', 'status', 'tags', 'mentions', 'comments'])
+        && data.id is string
+        && data.userId == request.auth.uid
+        && data.createdAt is string
+        && data.comments is list;
+    }
+
+    function isValidTreatment(data) {
+      return data.keys().hasAll(['id', 'title', 'description', 'responsible', 'status', 'priority', 'deadline', 'origin', 'usuario_criador', 'criado_em', 'atualizado_em', 'createdBy', 'createdByEmail', 'updatedBy', 'updatedByEmail', 'updatedAt'])
+        && data.id is string
+        && data.createdBy == request.auth.uid;
+    }
+
+    // 2. Collection Rules
+
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(userId) && incoming().id == userId;
+    }
+
     match /tickets/{ticketId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(ticketId)
-                     && incoming().keys().hasAll(['id', 'caseId', 'status', 'creatorUser', 'createdAt'])
-                     && incoming().createdAt == request.time;
-      allow update: if isSignedIn() 
-                     && incoming().updatedAt == request.time;
+      allow create: if isSignedIn() && isValidId(ticketId) && isValidTicket(incoming());
+      allow update: if isSignedIn() && (
+        // Identity Integrity: Ensure owner doesn't change
+        incoming().createdBy == existing().createdBy &&
+        // Action based update (Simplified for now - anyone can update if verified)
+        isEmailVerified()
+      );
+      allow delete: if isSignedIn() && isEmailVerified(); // In a real app we might want isOwner()
     }
 
-    // 3. KnowledgeBase
-    match /knowledgeBase/{knowledgeId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn(); // Restricted in production if needed
-    }
-
-    // 4. MuralPosts
     match /muralPosts/{postId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(postId)
-                     && incoming().userId == request.auth.uid
-                     && incoming().createdAt == request.time;
-      allow update: if isSignedIn()
-                     && (incoming().userId == request.auth.uid || incoming().diff(existing()).affectedKeys().hasOnly(['status', 'comments', 'treatment', 'tags']));
+      allow create: if isSignedIn() && isValidId(postId) && isValidMuralPost(incoming());
+      allow update: if isSignedIn() && (
+        incoming().createdBy == existing().createdBy &&
+        isEmailVerified()
+      );
+      allow delete: if isSignedIn() && isEmailVerified();
     }
 
-    // 5. Treatments
     match /treatments/{treatmentId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(treatmentId);
-      allow update: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(treatmentId) && isValidTreatment(incoming());
+      allow update: if isSignedIn() && isEmailVerified();
+      allow delete: if isSignedIn() && isEmailVerified();
     }
 
-    // 6. Notifications
-    match /notifications/{notifId} {
-      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
-      allow create: if isSignedIn(); // Mentions can create notifications
-      allow update: if isSignedIn() && resource.data.userId == request.auth.uid 
-                     && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+    match /notifications/{notificationId} {
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow get: if isOwner(existing().userId);
+      allow create: if isSignedIn(); // Users can create notifications for others via mentions
+      allow update: if isOwner(existing().userId) && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+      allow delete: if isOwner(existing().userId);
+    }
+
+    match /knowledgeBase/{version} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isEmailVerified();
+    }
+
+    match /configs/{configId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isEmailVerified();
+    }
+
+    match /test/connection {
+      allow read, write: if isSignedIn();
     }
   }
 }

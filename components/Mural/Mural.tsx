@@ -20,6 +20,7 @@ import {
   ChevronRight
 } from 'lucide-react';
 import { MuralPost, MuralPostType, MuralPostStatus, MuralPostCriticality, MuralTreatment, TicketRecord, MuralComment, User } from '../../types';
+import { User as FirebaseUser } from 'firebase/auth';
 import { format, parseISO, differenceInDays } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { 
@@ -33,6 +34,7 @@ interface MuralProps {
   posts: MuralPost[];
   userName: string;
   users: User[];
+  currentUser: FirebaseUser | null;
   onAddPost: (post: Omit<MuralPost, 'id' | 'createdAt' | 'comments'> & { id?: string }) => void;
   onUpdatePost: (post: MuralPost) => void;
   onDeletePost: (postId: string) => void;
@@ -53,6 +55,7 @@ const Mural: React.FC<MuralProps> = ({
   posts, 
   userName, 
   users,
+  currentUser,
   onAddPost, 
   onUpdatePost, 
   onDeletePost, 
@@ -93,12 +96,12 @@ const Mural: React.FC<MuralProps> = ({
   const [showArchived, setShowArchived] = useState(false);
 
   const availableUsers = useMemo(() => {
-    return users.filter(u => u.name !== userName).sort((a, b) => a.name.localeCompare(b.name));
+    return users.filter(u => u.name !== userName && u.isActive).sort((a, b) => a.name.localeCompare(b.name));
   }, [users, userName]);
 
   const filteredMentionUsers = useMemo(() => {
     if (!mentionSearch) return availableUsers;
-    return availableUsers.filter(u => u.name.toLowerCase().includes(mentionSearch.toLowerCase()));
+    return availableUsers.filter(u => (u.name || '').toLowerCase().includes(mentionSearch.toLowerCase()));
   }, [availableUsers, mentionSearch]);
 
   // Update local search when prop changes
@@ -287,9 +290,9 @@ const Mural: React.FC<MuralProps> = ({
       if (showMyMentions && myUser && !post.mentions.includes(myUser.id)) return false;
 
       if (searchLower) {
-        const textMatch = post.title.toLowerCase().includes(searchLower) || 
-                         post.description.toLowerCase().includes(searchLower) || 
-                         (post.caseId && post.caseId.toLowerCase().includes(searchLower));
+        const textMatch = (post.title || '').toLowerCase().includes(searchLower) || 
+                         (post.description || '').toLowerCase().includes(searchLower) || 
+                         (post.caseId && String(post.caseId).toLowerCase().includes(searchLower));
         
         if (!textMatch) return false;
       }
@@ -323,19 +326,26 @@ const Mural: React.FC<MuralProps> = ({
     const tempId = crypto.randomUUID();
     setNewlyCreatedPostId(tempId);
 
+    const now = new Date().toISOString();
     onAddPost({
       ...newPost,
       id: tempId,
-      userId: userName,
+      userId: currentUser?.uid || userName,
       userName: userName,
       tags: newPost.tags,
-      mentions: newPost.mentions
+      mentions: newPost.mentions,
+      createdBy: currentUser?.uid || 'system',
+      createdByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+      updatedBy: currentUser?.uid || 'system',
+      updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+      updatedAt: now
     });
 
     if (autoCreateTreatment) {
+      const treatmentId = crypto.randomUUID() as `${string}-${string}-${string}-${string}-${string}`;
       const newTreatment: MuralTreatment = {
-        id: crypto.randomUUID(),
-        mural_post_id: '', // Will be updated if we had the ID, but for now we create it separately or link it later
+        id: treatmentId,
+        mural_post_id: tempId,
         title: `Tratativa Automática: ${newPost.title}`,
         description: `Tratativa vinculada ao case ${newPost.caseId}. \n\n${newPost.description}`,
         responsible: userName,
@@ -344,8 +354,14 @@ const Mural: React.FC<MuralProps> = ({
         status: 'Aberta',
         origin: 'mural_auto',
         usuario_criador: userName,
-        criado_em: new Date().toISOString(),
-        atualizado_em: new Date().toISOString()
+        criado_em: now,
+        atualizado_em: now,
+        createdAt: now,
+        createdBy: currentUser?.uid || 'system',
+        createdByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+        updatedBy: currentUser?.uid || 'system',
+        updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+        updatedAt: now
       };
       onAddTreatment(newTreatment);
     }
@@ -521,6 +537,7 @@ const Mural: React.FC<MuralProps> = ({
                 onUpdateTreatment={onUpdateTreatment}
                 onDeleteTreatment={onDeleteTreatment}
                 userName={userName}
+                currentUser={currentUser}
               />
             ))
           ) : (
@@ -683,6 +700,7 @@ interface MuralCardProps {
   onUpdateTreatment: (treatment: MuralTreatment) => void;
   onDeleteTreatment: (treatmentId: string) => void;
   userName: string;
+  currentUser: FirebaseUser | null;
 }
 
 const MuralCard: React.FC<MuralCardProps> = ({ 
@@ -699,7 +717,8 @@ const MuralCard: React.FC<MuralCardProps> = ({
   onUpdateTreatment,
   onDeleteTreatment,
   userName,
-  users
+  users,
+  currentUser
 }) => {
   const [isCommenting, setIsCommenting] = useState(false);
   const [commentText, setCommentText] = useState('');
@@ -809,7 +828,7 @@ const MuralCard: React.FC<MuralCardProps> = ({
 
   const treatmentStatusColors = {
     'Aberta': 'bg-blue-100 text-blue-700 border-blue-200',
-    'Aguardando Sovos': 'bg-amber-100 text-amber-700 border-amber-200',
+    'Aguardando Retorno Técnico': 'bg-amber-100 text-amber-700 border-amber-200',
     'Em acompanhamento': 'bg-indigo-100 text-indigo-700 border-indigo-200',
     'Em validação interna': 'bg-purple-100 text-purple-700 border-purple-200',
     'Concluída': 'bg-emerald-100 text-emerald-700 border-emerald-200',
@@ -822,14 +841,19 @@ const MuralCard: React.FC<MuralCardProps> = ({
       return;
     }
 
+    const now = new Date().toISOString();
+
     if (treatment) {
       // Update
       onUpdateTreatment({
         ...treatment,
         ...treatmentData,
         priority: treatmentData.priority as MuralPostCriticality,
-        atualizado_em: new Date().toISOString(),
-        encerrado_em: treatmentData.status === 'Concluída' ? new Date().toISOString() : treatment.encerrado_em
+        atualizado_em: now,
+        encerrado_em: treatmentData.status === 'Concluída' ? now : treatment.encerrado_em,
+        updatedBy: currentUser?.uid || 'system',
+        updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+        updatedAt: now
       });
     } else {
       // Create
@@ -840,9 +864,15 @@ const MuralCard: React.FC<MuralCardProps> = ({
         priority: treatmentData.priority as MuralPostCriticality,
         origin: 'mural',
         usuario_criador: userName,
-        criado_em: new Date().toISOString(),
-        atualizado_em: new Date().toISOString(),
-        status: 'Aberta'
+        criado_em: now,
+        atualizado_em: now,
+        createdAt: now,
+        status: 'Aberta',
+        createdBy: currentUser?.uid || 'system',
+        createdByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+        updatedBy: currentUser?.uid || 'system',
+        updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+        updatedAt: now
       };
       onAddTreatment(newTreatment);
       // Also update the post to reflect it has a treatment (optional if we use separate state, but good for UI)
@@ -1180,8 +1210,9 @@ const MuralCard: React.FC<MuralCardProps> = ({
                          onClick={() => {
                            if (treatment) onUpdateTreatment({ ...treatment, responsible: u.name });
                            else {
+                              const now = new Date().toISOString();
                               const newT: MuralTreatment = {
-                                id: crypto.randomUUID(),
+                                id: crypto.randomUUID() as `${string}-${string}-${string}-${string}-${string}`,
                                 mural_post_id: post.id,
                                 title: `Tratativa: ${post.title}`,
                                 description: post.description,
@@ -1191,8 +1222,14 @@ const MuralCard: React.FC<MuralCardProps> = ({
                                 deadline: new Date(Date.now() + 86400000 * 3).toISOString().split('T')[0],
                                 origin: 'mural',
                                 usuario_criador: userName,
-                                criado_em: new Date().toISOString(),
-                                atualizado_em: new Date().toISOString()
+                                criado_em: now,
+                                atualizado_em: now,
+                                createdAt: now,
+                                createdBy: currentUser?.uid || 'system',
+                                createdByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+                                updatedBy: currentUser?.uid || 'system',
+                                updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+                                updatedAt: now
                               };
                               onAddTreatment(newT);
                            }
@@ -1239,12 +1276,15 @@ const MuralCard: React.FC<MuralCardProps> = ({
               onChange={(e) => setCommentText(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && commentText.trim()) {
+                  const now = new Date().toISOString();
                   const newComment: MuralComment = {
                     id: crypto.randomUUID(),
-                    userId: userName, 
+                    userId: currentUser?.uid || 'unknown', 
                     userName: userName,
                     content: commentText.trim(),
-                    createdAt: new Date().toISOString()
+                    createdAt: now,
+                    createdBy: currentUser?.uid || 'unknown',
+                    createdByEmail: currentUser?.email || 'unknown@farmaciassaojoao.com.br'
                   };
                   onUpdate({ ...post, comments: [...post.comments, newComment] });
                   setCommentText('');
@@ -1254,12 +1294,15 @@ const MuralCard: React.FC<MuralCardProps> = ({
             <button
               onClick={() => {
                 if (commentText.trim()) {
+                  const now = new Date().toISOString();
                   const newComment: MuralComment = {
                     id: crypto.randomUUID(),
-                    userId: userName,
+                    userId: currentUser?.uid || 'system',
                     userName: userName,
                     content: commentText.trim(),
-                    createdAt: new Date().toISOString()
+                    createdAt: now,
+                    createdBy: currentUser?.uid || 'system',
+                    createdByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br'
                   };
                   onUpdate({ ...post, comments: [...post.comments, newComment] });
                   setCommentText('');
@@ -1347,7 +1390,7 @@ const MuralCard: React.FC<MuralCardProps> = ({
                     onChange={(e) => setTreatmentData(prev => ({ ...prev, status: e.target.value as any }))}
                   >
                     <option value="Aberta">Aberta</option>
-                    <option value="Aguardando Sovos">Aguardando Sovos</option>
+                    <option value="Aguardando Retorno Técnico">Aguardando Retorno Técnico</option>
                     <option value="Em acompanhamento">Em acompanhamento</option>
                     <option value="Em validação interna">Em validação interna</option>
                     <option value="Concluída">Concluída</option>

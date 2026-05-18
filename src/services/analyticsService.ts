@@ -349,7 +349,7 @@ export const calculateAutomaticAlerts = (
     }
   });
 
-  // 2. FALTA DE RETORNO DA SOVOS (Cases sem atualização por tempo)
+  // 2. FALTA DE RETORNO TÉCNICO (Cases sem atualização por tempo)
   // Como TicketRecord não tem updatedAt, usamos openingDate para casos ATIVOS que estão há muito tempo sem retorno
   const activeStatuses = ['ABERTO', 'DEVOLVIDO'];
   const staleOpenCases = baseAnalitica.filter(r => 
@@ -362,11 +362,11 @@ export const calculateAutomaticAlerts = (
     alerts.push({
       id: crypto.randomUUID(),
       type: 'Operacional' as any,
-      title: 'Falta de retorno da Sovos',
-      message: `Há ${staleOpenCases.length} cases aguardando retorno da Sovos sem atualização há mais de 7 dias`,
+      title: 'Falta de retorno técnico',
+      message: `Há ${staleOpenCases.length} cases aguardando retorno sem atualização há mais de 7 dias`,
       severity: 'critical',
       timestamp: nowISO,
-      recommendation: 'Verificar status dos chamados técnicos na Sovos'
+      recommendation: 'Verificar status dos chamados técnicos pendentes'
     });
   }
 

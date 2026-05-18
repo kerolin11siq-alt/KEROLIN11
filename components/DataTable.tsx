@@ -1,6 +1,7 @@
 
 import React, { useState } from 'react';
 import { TicketRecord, TicketStatus, MuralTreatment } from '../types';
+import { User as FirebaseUser } from 'firebase/auth';
 import { Trash2, Edit3, ChevronDown, ChevronUp, Clock, ShieldCheck, Timer, Calendar, CheckCircle2, AlertCircle, MessageSquare, StickyNote, Link2, Plus, Search, ArrowUpRight } from 'lucide-react';
 import { differenceInDays, parseISO, startOfDay } from 'date-fns';
 
@@ -12,6 +13,7 @@ interface DataTableProps {
   onAddTreatment?: (treatment: MuralTreatment) => void;
   onSendToMural?: (record: TicketRecord, createTreatment?: boolean) => void;
   currentUserName?: string;
+  currentUser?: FirebaseUser | null;
   isRetrabalhoFilterActive?: boolean;
 }
 
@@ -23,6 +25,7 @@ const DataTable: React.FC<DataTableProps> = ({
   onAddTreatment,
   onSendToMural,
   currentUserName,
+  currentUser,
   isRetrabalhoFilterActive
 }) => {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
@@ -135,7 +138,7 @@ const DataTable: React.FC<DataTableProps> = ({
               </th>
               <th onClick={() => toggleSort('user')} className="px-6 py-5 text-white cursor-pointer hover:bg-white/10 transition-colors">
                 <div className="flex items-center gap-1">
-                  Analista Sovos
+                  Analista SOVOS
                   {sortField === 'user' && (sortDirection === 'asc' ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />)}
                 </div>
               </th>
@@ -237,15 +240,15 @@ const DataTable: React.FC<DataTableProps> = ({
                               </div>
                               <div className="flex flex-wrap gap-4">
                                 <div className="px-4 py-2 bg-white border border-gray-200 rounded-xl">
-                                  <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-0.5">Usuário Criador</p>
+                                  <p className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-0.5">Usuário Criador</p>
                                   <p className="text-[10px] font-bold text-gray-700">{r.creatorUser || 'N/A'}</p>
                                 </div>
                                 <div className="px-4 py-2 bg-white border border-gray-200 rounded-xl">
-                                  <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-0.5">Origem</p>
+                                  <p className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-0.5">Origem</p>
                                   <p className="text-[10px] font-bold text-gray-700 uppercase">{r.origin || 'manual'}</p>
                                 </div>
                                 <div className="px-4 py-2 bg-white border border-gray-200 rounded-xl">
-                                  <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-0.5">Criado em</p>
+                                  <p className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-0.5">Criado em</p>
                                   <p className="text-[10px] font-bold text-gray-700">{r.createdAt ? new Date(r.createdAt).toLocaleString('pt-BR') : '-'}</p>
                                 </div>
                               </div>
@@ -258,21 +261,30 @@ const DataTable: React.FC<DataTableProps> = ({
                                   <ShieldCheck className="w-4 h-4" /> Agir
                                 </button>
                                 <button 
-                                  onClick={() => onAddTreatment?.({
-                                    id: crypto.randomUUID(),
-                                    case_numero: r.caseId,
-                                    title: `Tratativa Case ${r.caseId}`,
-                                    description: `Tratativa iniciada para o case ${r.caseId} (${r.status}). \n\nEscopo: ${r.description}`,
-                                    subject: r.subject || 'Tratativa de Case',
-                                    responsible: currentUserName || '',
-                                    priority: 'Ação necessária',
-                                    deadline: new Date(Date.now() + 86400000 * 7).toISOString().split('T')[0],
-                                    status: 'Aberta',
-                                    origin: 'table',
-                                    usuario_criador: currentUserName || 'Sistema',
-                                    criado_em: new Date().toISOString(),
-                                    atualizado_em: new Date().toISOString()
-                                  })}
+                                  onClick={() => {
+                                    const now = new Date().toISOString();
+                                    onAddTreatment?.({
+                                      id: crypto.randomUUID(),
+                                      case_numero: r.caseId,
+                                      title: `Tratativa Case ${r.caseId}`,
+                                      description: `Tratativa iniciada para o case ${r.caseId} (${r.status}). \n\nEscopo: ${r.description}`,
+                                      subject: r.subject || 'Tratativa de Case',
+                                      responsible: currentUserName || '',
+                                      priority: 'Ação necessária',
+                                      deadline: new Date(Date.now() + 86400000 * 7).toISOString().split('T')[0],
+                                      status: 'Aberta',
+                                      origin: 'table',
+                                      usuario_criador: currentUserName || 'Sistema',
+                                      criado_em: now,
+                                      atualizado_em: now,
+                                      createdAt: now,
+                                      createdBy: currentUser?.uid || 'system',
+                                      createdByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+                                      updatedBy: currentUser?.uid || 'system',
+                                      updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+                                      updatedAt: now
+                                    });
+                                  }}
                                   className="px-4 py-2 bg-emerald-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-emerald-700 transition-all flex items-center gap-2 active:scale-95 shadow-md"
                                 >
                                   <Plus className="w-4 h-4" /> Abrir tratativa

@@ -1,11 +1,36 @@
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApp, getApps } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+import localConfig from '../../firebase-applet-config.json';
+
+const getConfigValue = (key: string, localValue: any) => {
+  const envValue = import.meta.env[key];
+  return envValue && envValue.trim() !== '' ? envValue : localValue;
+};
+
+const firebaseConfig = {
+  apiKey: getConfigValue('VITE_FIREBASE_API_KEY', localConfig.apiKey),
+  authDomain: getConfigValue('VITE_FIREBASE_AUTH_DOMAIN', localConfig.authDomain),
+  projectId: getConfigValue('VITE_FIREBASE_PROJECT_ID', localConfig.projectId),
+  storageBucket: getConfigValue('VITE_FIREBASE_STORAGE_BUCKET', localConfig.storageBucket),
+  messagingSenderId: getConfigValue('VITE_FIREBASE_MESSAGING_SENDER_ID', localConfig.messagingSenderId),
+  appId: getConfigValue('VITE_FIREBASE_APP_ID', localConfig.appId),
+  measurementId: getConfigValue('VITE_FIREBASE_MEASUREMENT_ID', localConfig.measurementId)
+};
+
+const databaseId = getConfigValue('VITE_FIREBASE_DATABASE_ID', localConfig.firestoreDatabaseId);
 
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = getFirestore(app, databaseId);
 export const auth = getAuth(app);
+
+// Helper for Admin to create users without losing their own session
+export const createSecondaryAuth = () => {
+  const secondaryAppName = 'secondary-auth';
+  const secondaryApp = getApps().find(app => app.name === secondaryAppName) 
+    || initializeApp(firebaseConfig, secondaryAppName);
+  return getAuth(secondaryApp);
+};
 
 // Utility to clean objects for Firestore (removes undefined)
 export function cleanData(data: any): any {
@@ -24,16 +49,10 @@ export function cleanData(data: any): any {
 // Test Connection
 async function testConnection() {
   try {
-    // We attempt a fetch from server to verify connectivity
     await getDocFromServer(doc(db, 'test', 'connection'));
-    console.log("Firebase connection established.");
   } catch (error: any) {
-    if (error.code === 'unavailable' || (error.message && error.message.includes('the client is offline'))) {
-      console.warn("Firestore backend is not reachable. Operating in offline mode.");
-    } else if (error.code === 'permission-denied') {
-      console.warn("Firestore access denied. Check your rules.");
-    } else {
-      console.error("Firebase connection error:", error);
+    if (error.code === 'unavailable') {
+      console.warn("Firestore appears offline.");
     }
   }
 }

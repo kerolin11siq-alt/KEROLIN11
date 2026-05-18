@@ -1,23 +1,42 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 0. Global Safety Net
+    // 0. Default Deny
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Connectivity Test Path
-    match /test/connection {
-      allow get: if true;
-    }
-
-    // Helpers
+    // 1. Global Helpers
     function isSignedIn() {
       return request.auth != null;
     }
-    
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+
+    function getEmail() {
+      return request.auth.token.get('email', '').lower();
+    }
+
+    function isCorporateEmail() {
+      let email = getEmail();
+      return isSignedIn() && (
+        email.endsWith('@farmaciassaojoao.com.br') ||
+        email == 'kerolin11siq@gmail.com' ||
+        email == 'kerolin.siqueira@farmaciassaojoao.com.br'
+      );
+    }
+
+    function isActive() {
+      return isSignedIn() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isActive', false) == true;
+    }
+
+    function isAdmin() {
+      let email = getEmail();
+      return isSignedIn() && (
+        email == 'kerolin.siqueira@farmaciassaojoao.com.br' ||
+        email == 'kerolin11siq@gmail.com' ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'user') == 'admin')
+      );
     }
 
     function incoming() {
@@ -28,58 +47,104 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // 1. Users
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Entity Validations
+    function isValidTicket(data) {
+      return data.keys().hasAll(['id', 'caseId', 'type', 'openingDate', 'user', 'status', 'createdAt', 'createdBy', 'createdByName', 'createdByEmail', 'updatedBy', 'updatedByName', 'updatedByEmail', 'updatedAt', 'origin'])
+        && data.id is string && data.id.size() <= 128
+        && data.caseId is string && data.caseId.size() <= 128
+        && data.type in ['PRODUÇÃO', 'PROJETO']
+        && data.status is string && data.status.size() <= 64
+        && data.createdBy == request.auth.uid
+        && data.updatedBy == request.auth.uid
+        && (data.updatedAt is string || data.updatedAt is timestamp);
+    }
+
+    function isValidMuralPost(data) {
+      return data.keys().hasAll(['id', 'userId', 'userName', 'createdAt', 'createdBy', 'createdByName', 'createdByEmail', 'updatedBy', 'updatedByName', 'updatedByEmail', 'updatedAt', 'type', 'title', 'description', 'subject', 'criticality', 'status', 'tags', 'mentions', 'comments'])
+        && data.id is string
+        && data.userId == request.auth.uid
+        && data.comments is list
+        && (data.updatedAt is string || data.updatedAt is timestamp);
+    }
+
+    function isValidTreatment(data) {
+      return data.keys().hasAll(['id', 'title', 'description', 'responsible', 'status', 'priority', 'deadline', 'origin', 'usuario_criador', 'criado_em', 'atualizado_em', 'createdAt', 'createdBy', 'createdByName', 'createdByEmail', 'updatedBy', 'updatedByName', 'updatedByEmail', 'updatedAt'])
+        && data.id is string
+        && data.createdBy == request.auth.uid
+        && (data.updatedAt is string || data.updatedAt is timestamp);
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'name', 'email', 'isActive', 'role', 'createdAt', 'createdBy'])
+        && data.id is string
+        && data.email is string
+        && (data.email.lower().endsWith('@farmaciassaojoao.com.br') || data.email.lower() == 'kerolin11siq@gmail.com' || data.email.lower() == 'kerolin.siqueira@farmaciassaojoao.com.br');
+    }
+
+    // 2. Collection Rules
+
     match /users/{userId} {
-      allow get, list: if isSignedIn();
-      allow create, update: if isSignedIn() && request.auth.uid == userId;
-      allow delete: if isSignedIn();
+      allow read: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow create: if isSignedIn() && (isAdmin() || (isOwner(userId) && (getEmail() == 'kerolin.siqueira@farmaciassaojoao.com.br' || getEmail() == 'kerolin11siq@gmail.com')));
+      allow update: if isSignedIn() && (isAdmin() || (isOwner(userId) && !incoming().diff(existing()).affectedKeys().hasAny(['role', 'isActive']))); 
+      allow delete: if isAdmin();
     }
 
-    // 2. Tickets
     match /tickets/{ticketId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(ticketId)
-                     && incoming().id == ticketId
-                     && incoming().caseId is string
-                     && incoming().caseId.size() <= 64;
-      allow update: if isSignedIn() && isValidId(ticketId);
-      allow delete: if isSignedIn() && isValidId(ticketId);
+      allow read: if isSignedIn() && isActive() && isCorporateEmail();
+      allow create: if isCorporateEmail() && isActive() && isValidId(ticketId) && isValidTicket(incoming());
+      allow update: if isCorporateEmail() && isActive() && isValidTicket(incoming());
+      allow delete: if isAdmin();
     }
 
-    // 3. MuralPosts
     match /muralPosts/{postId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(postId)
-                     && incoming().id == postId;
-      allow update: if isSignedIn() && isValidId(postId);
-      allow delete: if isSignedIn() && isValidId(postId);
+      allow read: if isSignedIn() && isActive() && isCorporateEmail();
+      allow create: if isCorporateEmail() && isActive() && isValidId(postId) && isValidMuralPost(incoming());
+      allow update: if isCorporateEmail() && isActive() && isValidMuralPost(incoming());
+      allow delete: if isAdmin() || (isSignedIn() && isActive() && isOwner(existing().userId));
     }
 
-    // 4. Treatments
     match /treatments/{treatmentId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidId(treatmentId);
-      allow update: if isSignedIn() && isValidId(treatmentId);
-      allow delete: if isSignedIn() && isValidId(treatmentId);
+      allow read: if isSignedIn() && isActive() && isCorporateEmail();
+      allow create: if isCorporateEmail() && isActive() && isValidId(treatmentId) && isValidTreatment(incoming());
+      allow update: if isCorporateEmail() && isActive() && isValidTreatment(incoming());
+      allow delete: if isAdmin();
     }
 
-    // 5. Notifications
-    match /notifications/{notifId} {
-      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
-      allow create: if isSignedIn() && isValidId(notifId);
-      allow update: if isSignedIn() && isValidId(notifId) && resource.data.userId == request.auth.uid;
-      allow delete: if isSignedIn() && isValidId(notifId) && resource.data.userId == request.auth.uid;
+    match /notifications/{notificationId} {
+      allow list: if isSignedIn() && isActive() && resource.data.userId == request.auth.uid;
+      allow get: if isOwner(existing().userId) && isActive();
+      allow create: if isSignedIn() && isActive(); 
+      allow update: if isOwner(existing().userId) && isActive() && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+      allow delete: if isOwner(existing().userId) && isActive();
     }
 
-    // 6. KnowledgeBase
-    match /knowledgeBase/{kbId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && isValidId(kbId);
+    match /knowledgeBase/{version} {
+      allow read: if isSignedIn() && isActive() && isCorporateEmail();
+      allow write: if (isAdmin() || isActive()) && isCorporateEmail();
     }
 
-    // 7. Configs (System)
     match /configs/{configId} {
-      allow read, write: if isSignedIn() && isValidId(configId);
+      allow read: if isSignedIn() && isActive() && isCorporateEmail();
+      allow write: if isAdmin();
+    }
+
+    match /logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isSignedIn() && isActive() && isCorporateEmail() && incoming().userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /test/connection {
+      allow read, write: if true;
     }
   }
 }

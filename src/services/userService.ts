@@ -62,44 +62,28 @@ export const saveUsers = (users: User[]): void => {
 };
 
 /**
- * Registra ou recupera um usuário baseado no nome
- * Garante que o nome de exibição seja o mais completo/correto encontrado
+ * Padroniza um nome de entrada e retorna o nome formatado (Title Case)
+ * Não sincroniza mais automaticamente com nenhuma lista.
  */
 export const syncUser = (name: string): User => {
-  if (!name) return { id: 'unknown', name: 'Desconhecido' };
-  
   const normalized = normalizeUserName(name);
-  if (!normalized) return { id: 'unknown', name: 'Desconhecido' };
+  const currentDisplayName = formatDisplayName(name) || 'Sistema';
 
-  const id = generateUserId(normalized);
-  const users = getStoredUsers();
-  const existingIndex = users.findIndex(u => u.id === id);
-
-  const currentDisplayName = formatDisplayName(name);
-
-  if (existingIndex >= 0) {
-    const existing = users[existingIndex];
-    // Se o novo nome for mais longo (provavelmente mais completo), atualiza o nome de exibição
-    if (currentDisplayName.length > existing.name.length) {
-      users[existingIndex].name = currentDisplayName;
-      saveUsers(users);
-      return users[existingIndex];
-    }
-    return existing;
-  }
-
-  const newUser: User = {
-    id,
-    name: currentDisplayName
+  return { 
+    id: generateUserId(normalized) || 'system', 
+    name: currentDisplayName, 
+    email: `${generateUserId(normalized) || 'system'}@farmaciassaojoao.com.br`, 
+    isActive: true, 
+    role: 'user',
+    createdAt: new Date().toISOString() 
   };
-
-  saveUsers([...users, newUser]);
-  return newUser;
 };
 
 /**
- * Padroniza um nome de entrada e retorna o nome de exibição oficial
+ * Padroniza um nome de entrada e retorna o nome de exibição formatado
+ * Esta função agora é pura e não gera efeitos colaterais (não salva dados).
  */
 export const standardizeName = (name: string): string => {
-  return syncUser(name).name;
+  if (!name || name.trim() === '') return '';
+  return formatDisplayName(name);
 };

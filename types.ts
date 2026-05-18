@@ -1,12 +1,27 @@
 
-export type TicketStatus = 'ABERTO' | 'EM ANDAMENTO' | 'EM ANALISE' | 'AGUARDANDO' | 'DEVOLVER SOVOS' | 'CONCLUÍDO' | 'DEVOLVIDO' | 'NÃO INFORMADO';
+export type TicketStatus = 'ABERTO' | 'EM ANDAMENTO' | 'EM ANALISE' | 'AGUARDANDO' | 'DEVOLVER TÉCNICO' | 'CONCLUÍDO' | 'DEVOLVIDO' | 'NÃO INFORMADO';
 export type TicketType = 'PRODUÇÃO' | 'PROJETO';
 export type SLALevel = 'NO PRAZO' | 'ALERTA' | 'CRÍTICO';
 
 export interface User {
   id: string;
   name: string;
+  email: string;
+  isActive: boolean;
+  role: 'admin' | 'user';
+  profile?: string; // Metadata field for "perfil"
   photoURL?: string;
+  lastSeen?: string; // ISO String
+  lastLogin?: string; // ISO String
+  createdAt: string; // ISO String
+  createdBy?: string;
+  createdByName?: string;
+  createdByEmail?: string;
+  updatedBy?: string;
+  updatedByName?: string;
+  updatedByEmail?: string;
+  updatedAt?: string;
+  isOnline?: boolean;
 }
 
 export interface TicketRecord {
@@ -26,6 +41,13 @@ export interface TicketRecord {
   status: TicketStatus; // STATUS
   creatorUser: string; // Usuário criador (sessão)
   createdAt: string; // Data de criação do registro
+  createdBy: string; // UID do usuário responsável pela criação
+  createdByName?: string; // Nome do usuário responsável pela criação
+  createdByEmail: string; // Email do usuário responsável pela criação
+  updatedBy: string; // UID do usuário responsável pela última alteração
+  updatedByName?: string; // Nome do usuário responsável pela última alteração
+  updatedByEmail: string; // Email do usuário responsável pela última alteração
+  updatedAt: string; // Data da última alteração
   origin: 'manual' | 'mural' | 'workflow' | 'import'; // Origem do registro
   muralPostId?: string; // ID da postagem de origem se for do mural
   slaStartDate?: string; // Campo auxiliar para cálculo de SLA
@@ -102,7 +124,7 @@ export interface KnowledgeBase {
   patterns: Record<string, string[]>; // synonym patterns
 }
 
-export type ViewType = 'table' | 'dashboard' | 'mural' | 'management' | 'search';
+export type ViewType = 'table' | 'dashboard' | 'mural' | 'management' | 'search' | 'users';
 
 export type MuralPostType = 
   | 'Informativo'
@@ -134,7 +156,7 @@ export type MuralPostCriticality =
 
 export type MuralTreatmentStatus = 
   | 'Aberta' 
-  | 'Aguardando Sovos' 
+  | 'Aguardando Retorno Técnico' 
   | 'Em acompanhamento' 
   | 'Em validação interna' 
   | 'Concluída' 
@@ -157,6 +179,14 @@ export interface MuralTreatment {
   atualizado_em: string;
   encerrado_em?: string;
   observacoes_internas?: string;
+  createdAt: string;
+  createdBy: string;
+  createdByName?: string;
+  createdByEmail: string;
+  updatedBy: string;
+  updatedByName?: string;
+  updatedByEmail: string;
+  updatedAt: string;
 }
 
 export interface MuralComment {
@@ -165,6 +195,9 @@ export interface MuralComment {
   userName: string;
   content: string;
   createdAt: string;
+  createdBy: string;
+  createdByName?: string;
+  createdByEmail: string;
 }
 
 export interface MuralPost {
@@ -172,6 +205,13 @@ export interface MuralPost {
   userId: string;
   userName: string;
   createdAt: string;
+  createdBy: string;
+  createdByName?: string;
+  createdByEmail: string;
+  updatedBy: string;
+  updatedByName?: string;
+  updatedByEmail: string;
+  updatedAt: string;
   type: MuralPostType;
   title: string;
   description: string;
@@ -203,4 +243,5 @@ export interface MuralNotification {
   type: 'mention' | 'comment' | 'treatment';
   read: boolean;
   createdAt: string;
+  caseId?: string;
 }

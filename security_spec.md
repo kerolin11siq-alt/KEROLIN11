@@ -1,28 +1,31 @@
-# Security Specification - FSJ Monitor
+# Security Specification - Collaborative Operational Tool
 
 ## 1. Data Invariants
-- A **Ticket** must have a valid `caseId` and `creatorUser`.
-- A **MuralPost** must be linked to a `userId` (author).
-- A **MuralTreatment** must be linked to a `mural_post_id` (if applicable) and have a `responsible`.
-- **User** profiles can only be created by the user themselves.
-- **Notifications** are private to the recipient.
+- A `TicketRecord` must be linked to a valid case ID and have identifying audit fields.
+- A `MuralPost` must have a creator and a description.
+- `MuralComment` must be linked to a `MuralPost`.
+- `MuralTreatment` must be linked to a `MuralPost`.
+- Notifications can only be read by the `userId` they are assigned to.
+- User profiles can only be updated by the owner (except for presence/lastSeen which might be updated by session logic).
 
-## 2. The "Dirty Dozen" Payloads (Attack Vectors)
-1. **Identity Spoofing**: Attempt to create a `MuralPost` with another user's `userId`.
-2. **Resource Poisoning**: High-size string in `description` (exceeding 5000 chars).
-3. **Privilege Escalation**: Attempt to delete another user's `MuralPost`.
-4. **State Shortcutting**: Mark a `Ticket` as `CONCLUIDO` without going through mandatory fields (if enforced).
-5. **Orphaned Writes**: Create a `MuralTreatment` for a non-existent `MuralPost`.
-6. **Information Disclosure**: Read all user profiles (PII leak).
-7. **Spam Attack**: Rapid creation of `MuralComments`.
-8. **Invalid ID Injection**: Use special characters in document IDs.
-9. **Timestamp Manipulation**: Set `createdAt` to a future date.
-10. **Bypassing Verification**: Write data without `email_verified == true` (if required).
-11. **Shadow Field Injection**: Adding an `isAdmin` field to a `User` profile.
-12. **Unauthorized List Query**: Querying all `notifications` without filtering by `userId`.
+## 2. The "Dirty Dozen" Payloads
+1. **Identity Spoofing:** Creating a ticket with `createdBy` set to another user's UID.
+2. **PII Leak:** An unauthenticated user attempting to list the `users` collection.
+3. **State Shortcutting:** Updating a `TicketRecord` status from `ABERTO` directly to `CONCLUÍDO` without being the owner or having proper permissions (if tiers are enforced).
+4. **Ghost Field Injection:** Adding an `isAdmin: true` field to a `User` profile update.
+5. **Orphaned Write:** Creating a `MuralComment` for a `MuralPost` that doesn't exist.
+6. **Notification Hijack:** A user attempting to read or mark as read a notification belonging to another user.
+7. **Resource Poisoning:** Injecting a 1MB string into the `caseId` field of a `TicketRecord`.
+8. **Unauthorized Deletion:** An authenticated user attempting to delete a `MuralPost` they didn't create.
+9. **Timestamp Spoofing:** Setting a future date for `createdAt` in a new `MuralPost`.
+10. **Query Scraping:** An authenticated user listing ALL `tickets` without a filter, trying to bypass intended UI limits.
+11. **Immutable Field Update:** Changing the `caseId` of an existing `TicketRecord`.
+12. **Self-Promotion:** A user trying to add themselves to a hypothetical `admins` collection.
 
-## 3. Test Runner (Draft)
-A test suite will be implemented to verify:
-- `allow create/update`: if `request.auth.uid == data.userId`
-- `allow read`: if `resource.data.userId == request.auth.uid` (for notifications)
-- `isValidId()` check for all path variables.
+## 3. The Test Runner
+```typescript
+import { TicketRecord, MuralPost, MuralComment, MuralTreatment, User as AppUser, MuralNotification } from './types';
+
+// Mock payloads for testing security rules (TDD approach)
+// These would be used with the Firebase Emulators in a real environment.
+```

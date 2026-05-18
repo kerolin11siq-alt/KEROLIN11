@@ -2,6 +2,7 @@
 import React, { useState, useMemo } from 'react';
 import { Search, Database, MessageSquare, ClipboardList, ChevronRight, AlertCircle, ArrowRight, ExternalLink, Filter, Bot, Plus, X, ArrowUpRight, ArrowDownRight, Minus, ShieldCheck } from 'lucide-react';
 import { TicketRecord, KnowledgeBase, MuralPost, MuralTreatment } from '../types';
+import { User as FirebaseUser } from 'firebase/auth';
 import { smartSearch, normalizeText, GroupedSearchResult, SmartSearchResult, SmartSearchResponse } from '../src/services/searchService';
 import { getThemeTrend } from '../src/services/analyticsService';
 import { subDays, parseISO, isAfter, isSameDay } from 'date-fns';
@@ -14,9 +15,10 @@ interface SmartSearchProps {
   onOpenCase: (caseId: string) => void;
   onAddTreatment: (treatment: MuralTreatment) => void;
   userName: string;
+  currentUser: FirebaseUser | null;
 }
 
-const SmartSearch: React.FC<SmartSearchProps> = ({ records, muralPosts, tratativas, kb, onOpenCase, onAddTreatment, userName }) => {
+const SmartSearch: React.FC<SmartSearchProps> = ({ records, muralPosts, tratativas, kb, onOpenCase, onAddTreatment, userName, currentUser }) => {
   const [query, setQuery] = useState('');
   const [isTreatmentOpen, setIsTreatmentOpen] = useState(false);
   const [treatmentData, setTreatmentData] = useState<Partial<MuralTreatment>>({});
@@ -76,6 +78,7 @@ const SmartSearch: React.FC<SmartSearchProps> = ({ records, muralPosts, tratativ
       return;
     }
 
+    const now = new Date().toISOString();
     const newTreatment: MuralTreatment = {
       id: crypto.randomUUID(),
       title: treatmentData.title || '',
@@ -86,8 +89,14 @@ const SmartSearch: React.FC<SmartSearchProps> = ({ records, muralPosts, tratativ
       status: 'Aberta',
       origin: 'search',
       usuario_criador: userName,
-      criado_em: new Date().toISOString(),
-      atualizado_em: new Date().toISOString()
+      criado_em: now,
+      atualizado_em: now,
+      createdAt: now,
+      createdBy: currentUser?.uid || 'system',
+      createdByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+      updatedBy: currentUser?.uid || 'system',
+      updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+      updatedAt: now
     };
 
     onAddTreatment(newTreatment);

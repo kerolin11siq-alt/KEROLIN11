@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, ClipboardList, User as UserIcon, Users, Calendar, AlertCircle, CheckCircle2, MessageSquare, StickyNote, Link2, CalendarCheck, CalendarDays, AlertTriangle, Info, Search, Loader2, ArrowRight, ShieldCheck, Plus } from 'lucide-react';
 import { TicketRecord, TicketStatus, TicketType, KnowledgeBase, CaseKnowledge, MuralPost, User, MuralTreatment } from '../types';
+import { User as FirebaseUser } from 'firebase/auth';
 import { aiManager, AIPriority } from '../src/services/aiManager';
 import { performSearch, prioritizeResults } from '../src/services/searchService';
 import { getSmartSuggestions, getAiClassification } from '../src/services/analyticsService';
@@ -14,6 +15,7 @@ interface RecordFormProps {
   kb: KnowledgeBase;
   users: User[];
   defaultUser?: string;
+  currentUser: FirebaseUser | null;
   muralPosts?: MuralPost[];
   onAddTreatment?: (treatment: MuralTreatment) => void;
   onSendToMural?: (record: TicketRecord, createTreatment?: boolean) => void;
@@ -27,6 +29,7 @@ const RecordForm: React.FC<RecordFormProps> = ({
   kb, 
   users, 
   defaultUser, 
+  currentUser,
   muralPosts = [],
   onAddTreatment,
   onSendToMural
@@ -52,6 +55,11 @@ const RecordForm: React.FC<RecordFormProps> = ({
     status: 'ABERTO' as TicketStatus,
     creatorUser: defaultUser || '',
     createdAt: new Date().toISOString(),
+    createdBy: currentUser?.uid || '',
+    createdByEmail: currentUser?.email || '',
+    updatedBy: currentUser?.uid || '',
+    updatedByEmail: currentUser?.email || '',
+    updatedAt: new Date().toISOString(),
     origin: 'manual' as 'manual' | 'manual' | 'mural' | 'workflow' | 'import',
     muralPostId: undefined as string | undefined
   });
@@ -91,6 +99,11 @@ const RecordForm: React.FC<RecordFormProps> = ({
         status: initialData.status || 'ABERTO',
         creatorUser: initialData.creatorUser || defaultUser || '',
         createdAt: initialData.createdAt || new Date().toISOString(),
+        createdBy: initialData.createdBy || currentUser?.uid || '',
+        createdByEmail: initialData.createdByEmail || currentUser?.email || '',
+        updatedBy: currentUser?.uid || '',
+        updatedByEmail: currentUser?.email || '',
+        updatedAt: new Date().toISOString(),
         origin: initialData.origin || 'manual',
         muralPostId: initialData.muralPostId
       });
@@ -343,8 +356,16 @@ const RecordForm: React.FC<RecordFormProps> = ({
     if (formData.status === 'CONCLUÍDO' && !formData.conclusionDate) {
        formData.conclusionDate = getLocalDateString();
     }
+
+    const now = new Date().toISOString();
+    const finalData = {
+      ...formData,
+      updatedAt: now,
+      updatedBy: currentUser?.uid || 'system',
+      updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br'
+    };
     
-    onSubmit(formData);
+    onSubmit(finalData);
   };
 
   return (
@@ -357,7 +378,7 @@ const RecordForm: React.FC<RecordFormProps> = ({
             </div>
             <div>
               <h2 className="text-2xl font-black uppercase tracking-tight">Registro de Chamado SO</h2>
-              <p className="text-[10px] font-bold opacity-80 uppercase tracking-widest">FSJ Acompanhamento de Cases Sovos | Cadastro Inteligente Ativo</p>
+              <p className="text-[10px] font-bold opacity-80 uppercase tracking-widest">FSJ Acompanhamento de Cases SOVOS | Cadastro Inteligente Ativo</p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full transition-all">
@@ -387,7 +408,7 @@ const RecordForm: React.FC<RecordFormProps> = ({
                       <h3 className={`text-lg font-black uppercase tracking-tight ${similarRecords.some(r => r.score >= 80) ? 'text-[#D91B2A]' : 'text-amber-800'}`}>
                         🔎 Verificação de duplicidade
                       </h3>
-                      <p className="text-[10px] font-bold text-gray-500 uppercase tracking-[0.2em] mt-1 italic">📌 Resumo da análise: {isChecking ? (isAiChecking ? 'Análise Semântica em curso...' : 'Analisando similaridade...') : similarRecords.some(r => r.score >= 80) ? 'Foram encontrados cases com alta aderência' : 'Precedentes Localizados'}</p>
+                      <p className="text-[10px] font-black text-gray-700 uppercase tracking-[0.2em] mt-1 italic">📌 Resumo da análise: {isChecking ? (isAiChecking ? 'Análise Semântica em curso...' : 'Analisando similaridade...') : similarRecords.some(r => r.score >= 80) ? 'Foram encontrados cases com alta aderência' : 'Precedentes Localizados'}</p>
                     </div>
                   </div>
                   {(isChecking || isAiChecking) && <Loader2 className="w-6 h-6 text-[#003DA5] animate-spin" />}
@@ -420,24 +441,24 @@ const RecordForm: React.FC<RecordFormProps> = ({
                                   'bg-blue-50 text-blue-700 border-blue-100'
                                 }`}>{classification}</span>
                                 <div className="h-1 w-1 bg-gray-300 rounded-full" />
-                                <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest">{record.score}% Aderência</span>
+                                <span className="text-[9px] font-black text-gray-600 uppercase tracking-widest">{record.score}% Aderência</span>
                               </div>
                               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-3">
                                 <div>
-                                  <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-0.5">Produto</p>
+                                  <p className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-0.5">Produto</p>
                                   <p className="text-[10px] font-bold text-gray-700 truncate">{enriched?.layers.technical.product || 'N/A'}</p>
                                 </div>
                                 <div>
-                                  <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-0.5">NCM</p>
+                                  <p className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-0.5">NCM</p>
                                   <p className="text-[10px] font-bold text-gray-700">{enriched?.layers.technical.ncm || 'N/A'}</p>
                                 </div>
                                 <div>
-                                  <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-0.5">UF</p>
+                                  <p className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-0.5">UF</p>
                                   <p className="text-[10px] font-bold text-gray-700">{enriched?.layers.identity.uf || 'N/A'}</p>
                                 </div>
                                 <div>
                                   <p className="text-[8px] font-black text-[#D91B2A] uppercase tracking-widest mb-0.5">Motivo</p>
-                                  <p className="text-[10px] font-bold text-gray-600 truncate">{record.reason}</p>
+                                  <p className="text-[10px] font-bold text-gray-700 truncate">{record.reason}</p>
                                 </div>
                               </div>
                               {enriched?.layers.fiscal.legalBase && (
@@ -557,7 +578,7 @@ const RecordForm: React.FC<RecordFormProps> = ({
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               <div>
-                <label className="block text-[10px] font-black text-gray-950 uppercase mb-1 tracking-widest">Analista Sovos</label>
+                <label className="block text-[10px] font-black text-gray-950 uppercase mb-1 tracking-widest">Analista SOVOS</label>
                 <div className="relative">
                   <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                   <input 
@@ -571,12 +592,12 @@ const RecordForm: React.FC<RecordFormProps> = ({
                     onFocus={() => setShowUserList(true)}
                     onBlur={() => setTimeout(() => setShowUserList(false), 200)}
                     className="w-full pl-12 pr-5 py-3 border-2 border-gray-200 rounded-2xl font-bold text-sm text-black outline-none focus:border-[#003DA5] placeholder-gray-500" 
-                    placeholder="Atendente Sovos" 
+                    placeholder="Atendente SOVOS" 
                   />
                   {showUserList && (
                     <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-xl shadow-2xl max-h-48 overflow-y-auto">
                       {users
-                        .filter(u => u.name.toLowerCase().includes(userSearch.toLowerCase()))
+                        .filter(u => (u.name || '').toLowerCase().includes(userSearch.toLowerCase()))
                         .map(u => (
                           <button
                             key={u.id}
@@ -614,7 +635,7 @@ const RecordForm: React.FC<RecordFormProps> = ({
                   {showExternalUserList && (
                     <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-xl shadow-2xl max-h-48 overflow-y-auto">
                       {users
-                        .filter(u => u.name.toLowerCase().includes(externalUserSearch.toLowerCase()))
+                        .filter(u => (u.name || '').toLowerCase().includes(externalUserSearch.toLowerCase()))
                         .map(u => (
                           <button
                             key={u.id}
@@ -633,10 +654,10 @@ const RecordForm: React.FC<RecordFormProps> = ({
                 </div>
               </div>
               <div>
-                <label className="block text-[10px] font-black text-gray-400 uppercase mb-1 tracking-widest">Usuário Criador</label>
+                <label className="block text-[10px] font-black text-gray-700 uppercase mb-1 tracking-widest">Usuário Criador</label>
                 <div className="relative">
                   <ShieldCheck className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-300" />
-                  <input readOnly value={formData.creatorUser} className="w-full pl-12 pr-5 py-3 border-2 border-gray-100 bg-gray-50 rounded-2xl font-bold text-sm text-gray-400 outline-none cursor-not-allowed" />
+                  <input readOnly value={formData.creatorUser} className="w-full pl-12 pr-5 py-3 border-2 border-gray-100 bg-gray-50 rounded-2xl font-bold text-sm text-gray-600 outline-none cursor-not-allowed" />
                 </div>
               </div>
             </div>
@@ -652,12 +673,12 @@ const RecordForm: React.FC<RecordFormProps> = ({
                 <label className="flex items-center gap-2 text-[10px] font-black text-gray-950 uppercase mb-1 tracking-widest">
                   <AlertCircle className="w-3 h-3 text-red-700" /> Descrição Erro Regra
                 </label>
-                <textarea rows={2} value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full px-5 py-3 border-2 border-gray-200 rounded-2xl font-bold text-sm text-black resize-none outline-none focus:border-[#003DA5] placeholder-gray-500" placeholder="Explique o erro técnico..." />
+                <textarea rows={2} value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full px-5 py-3 border-2 border-gray-200 rounded-2xl font-bold text-sm text-black resize-none outline-none focus:border-[#003DA5] placeholder-gray-600" placeholder="Explique o erro técnico..." />
                 
                 {/* Sugestão de Categoria em tempo real */}
                 {smartSuggestions?.suggestedCategory && (
                    <div className="mt-2 flex items-center gap-2 animate-in fade-in slide-in-from-left-2">
-                     <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Sugestão de Categoria:</span>
+                     <span className="text-[9px] font-black text-gray-600 uppercase tracking-widest">Sugestão de Categoria:</span>
                      <button 
                        type="button"
                        onClick={() => setFormData(prev => ({ ...prev, subject: smartSuggestions.suggestedCategory }))}
@@ -677,7 +698,7 @@ const RecordForm: React.FC<RecordFormProps> = ({
                 {/* Sugestão de Cenário */}
                 {smartSuggestions?.suggestedScenario && (
                    <div className="mt-2 flex items-center gap-2 animate-in fade-in slide-in-from-left-2">
-                     <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Cenário provável:</span>
+                     <span className="text-[9px] font-black text-gray-600 uppercase tracking-widest">Cenário provável:</span>
                      <button 
                        type="button"
                        onClick={() => setFormData(prev => ({ ...prev, scenarios: smartSuggestions.suggestedScenario }))}
@@ -724,7 +745,7 @@ const RecordForm: React.FC<RecordFormProps> = ({
                 )}
                 <button type="button" onClick={onClose} className="flex-1 py-4 bg-gray-100 text-gray-600 font-black uppercase text-xs rounded-2xl hover:bg-gray-200 transition-colors">Cancelar</button>
                 <button type="submit" className="flex-[2] py-4 bg-[#003DA5] text-white font-black uppercase text-xs rounded-2xl shadow-xl hover:bg-blue-800 flex items-center justify-center gap-3 transition-all transform hover:scale-[1.02]">
-                  <Save className="w-4 h-4" /> Efetivar Registro Sovos
+                  <Save className="w-4 h-4" /> Efetivar Registro
                 </button>
               </div>
             </div>
@@ -741,8 +762,8 @@ const RecordForm: React.FC<RecordFormProps> = ({
 
             {!smartSuggestions ? (
               <div className="flex flex-col items-center justify-center h-64 text-center space-y-4 opacity-40">
-                <Search className="w-8 h-8 text-gray-400" />
-                <p className="text-[10px] font-bold uppercase tracking-widest text-gray-500">Digite a descrição para ativar a inteligência assistida</p>
+                <Search className="w-8 h-8 text-gray-600" />
+                <p className="text-[10px] font-bold uppercase tracking-widest text-gray-700">Digite a descrição para ativar a inteligência assistida</p>
               </div>
             ) : (
               <div className="space-y-6">
@@ -788,7 +809,7 @@ const RecordForm: React.FC<RecordFormProps> = ({
                 {/* Resumo Inteligente */}
                 <div className="space-y-4">
                   <div>
-                    <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-2">Categoria Sugerida</p>
+                    <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-2">Categoria Sugerida</p>
                     <div className="p-3 bg-white border border-gray-200 rounded-xl shadow-sm">
                       <p className="text-[11px] font-black text-[#003DA5]">{smartSuggestions.suggestedCategory}</p>
                     </div>
@@ -846,17 +867,17 @@ const RecordForm: React.FC<RecordFormProps> = ({
 
                   <div className="grid grid-cols-2 gap-3">
                     <div className="p-3 bg-white border border-gray-200 rounded-xl shadow-sm">
-                      <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-1">Ocorrências</p>
+                      <p className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-1">Ocorrências</p>
                       <p className="text-lg font-black text-gray-900">{smartSuggestions.occurrenceCount}</p>
                     </div>
                     <div className="p-3 bg-white border border-gray-200 rounded-xl shadow-sm">
-                      <p className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-1">Últimos 7 dias</p>
+                      <p className="text-[8px] font-black text-gray-600 uppercase tracking-widest mb-1">Últimos 7 dias</p>
                       <p className="text-lg font-black text-[#D91B2A]">{smartSuggestions.recentOccurrenceCount}</p>
                     </div>
                   </div>
 
                   <div>
-                    <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-2">Criticidade Sugerida</p>
+                    <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-2">Criticidade Sugerida</p>
                     <div className={`p-3 border-2 rounded-xl flex items-center justify-between ${
                       smartSuggestions.suggestedCriticality === 'Crítica' ? 'bg-red-50 border-red-200 text-red-700' :
                       smartSuggestions.suggestedCriticality === 'Alta' ? 'bg-orange-50 border-orange-200 text-orange-700' :
@@ -871,7 +892,7 @@ const RecordForm: React.FC<RecordFormProps> = ({
                   {/* Alertas Ativos */}
                   {smartSuggestions.activeAlerts.length > 0 && (
                     <div>
-                      <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-2">Alertas Relacionados</p>
+                      <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-2">Alertas Relacionados</p>
                       <div className="space-y-2">
                         {smartSuggestions.activeAlerts.map((alert: any) => (
                           <div key={alert.id} className="p-2 bg-amber-50 border border-amber-100 rounded-lg flex items-start gap-2">
@@ -885,7 +906,7 @@ const RecordForm: React.FC<RecordFormProps> = ({
 
                   {/* Assuntos Semelhantes */}
                   <div>
-                    <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-2">Assuntos Semelhantes</p>
+                    <p className="text-[9px] font-black text-gray-600 uppercase tracking-widest mb-2">Assuntos Semelhantes</p>
                     <div className="space-y-2">
                       {smartSuggestions.similarCases.map((s: any) => (
                         <div key={s.caseId} className="p-3 bg-white border border-gray-100 rounded-xl shadow-sm hover:border-blue-200 transition-all group cursor-help">

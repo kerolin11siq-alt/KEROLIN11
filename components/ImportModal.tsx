@@ -2,13 +2,15 @@
 import React, { useState, useRef } from 'react';
 import { X, Upload, CheckCircle2, AlertCircle, FileSpreadsheet, Loader2 } from 'lucide-react';
 import { TicketRecord, TicketStatus } from '../types';
+import { User as FirebaseUser } from 'firebase/auth';
 
 interface ImportModalProps {
   onImport: (records: TicketRecord[], report: { total: number, duplicated: number }) => void;
   onClose: () => void;
+  currentUser: FirebaseUser | null;
 }
 
-const ImportModal: React.FC<ImportModalProps> = ({ onImport, onClose }) => {
+const ImportModal: React.FC<ImportModalProps> = ({ onImport, onClose, currentUser }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -194,6 +196,7 @@ const ImportModal: React.FC<ImportModalProps> = ({ onImport, onClose }) => {
         
         const previousCaseId = (rowData.previousCaseId || '').trim().toUpperCase() || undefined;
         
+        const now = new Date().toISOString();
         importedRecords.push({
           id: crypto.randomUUID(),
           caseId: caseId,
@@ -203,14 +206,19 @@ const ImportModal: React.FC<ImportModalProps> = ({ onImport, onClose }) => {
           openingDate: opDate,
           returnDate: retDate,
           conclusionDate: retDate,
-          user: rowData.user || 'Analista Sovos',
+          user: rowData.user || 'Analista SOVOS',
           externalUser: rowData.externalUser || '',
           description: rowData.description || '',
           scenarios: rowData.scenarios || '',
           observations: (rowData.observations || '') + (unmappedData.length > 0 ? `\n\n[DADOS EXTRAS DA PLANILHA]:\n${unmappedData.join('\n')}` : ''),
           status: mapStatus(String(rowData.status || '')),
-          creatorUser: 'SISTEMA',
-          createdAt: new Date().toISOString(),
+          creatorUser: currentUser?.displayName || 'SISTEMA',
+          createdAt: now,
+          createdBy: currentUser?.uid || 'system',
+          createdByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+          updatedBy: currentUser?.uid || 'system',
+          updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+          updatedAt: now,
           origin: 'workflow'
         });
       }

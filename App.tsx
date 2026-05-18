@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { Plus, Search, Filter, Upload, ShieldCheck, FilterX, Download, Database, Calendar, Trash2, CalendarDays, LogIn, LogOut } from 'lucide-react';
+import { Plus, Search, Filter, Upload, ShieldCheck, FilterX, Download, Database, Calendar, Trash2, CalendarDays, LogIn, LogOut, AlertCircle, Users, Lock } from 'lucide-react';
 import { TicketRecord, ViewType, KnowledgeBase, MuralPost, MuralPostType, MuralPostStatus, MuralPostCriticality, TicketStatus, TicketType, MuralTreatment, MuralNotification, User } from './types';
-import { standardizeName, syncUser, USERS_LIST_KEY } from './src/services/userService';
+import { standardizeName } from './src/services/userService';
 import Header from './components/Header';
 import RecordForm from './components/RecordForm';
 import DataTable from './components/DataTable';
@@ -11,6 +11,7 @@ import ManagementDashboard, { NavigationContext } from './components/ManagementD
 import ImportModal from './components/ImportModal';
 import SmartSearch from './components/SmartSearch';
 import Mural from './components/Mural/Mural';
+import UserManagement from './components/UserManagement';
 import { differenceInDays, parseISO, startOfDay, isAfter, isBefore, isValid, parse, subDays, format } from 'date-fns';
 import { learnFromCase, updateKnowledgeBase, indexKeywords, updateKnowledgeBaseWithKeywords } from './src/services/knowledgeService';
 import { semanticCache } from './src/services/semanticCacheService';
@@ -25,11 +26,12 @@ import {
 import { auth, db, cleanData } from './src/lib/firebase';
 import { 
   onAuthStateChanged, 
-  signInWithPopup, 
-  signInAnonymously,
-  GoogleAuthProvider, 
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
   signOut,
   updateProfile,
+  updatePassword,
   User as FirebaseUser 
 } from 'firebase/auth';
 import { 
@@ -78,7 +80,7 @@ const globalRobustDateParse = (dateStr: string | undefined): Date | null => {
   return null;
 };
 
-const normalizeRecord = (record: TicketRecord): TicketRecord => {
+const normalizeRecord = (record: TicketRecord, currentUser: FirebaseUser | null): TicketRecord => {
   const statusMap: Record<string, TicketStatus> = {
     'ABERTO': 'ABERTO',
     'DEVOLVIDO': 'DEVOLVIDO',
@@ -114,10 +116,26 @@ const normalizeRecord = (record: TicketRecord): TicketRecord => {
     normalizedCategory = gerarCategoria(record.subject || record.description || "");
   }
 
+  const now = new Date().toISOString();
+  
+  const audit: Partial<TicketRecord> = {
+    updatedAt: now,
+    updatedBy: currentUser?.uid || 'system',
+    updatedByName: standardizeName(currentUser?.displayName || 'Sistema'),
+    updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+  };
+
+  if (!record.createdAt) {
+    audit.createdAt = now;
+    audit.createdBy = currentUser?.uid || 'system';
+    audit.createdByName = standardizeName(currentUser?.displayName || 'Sistema');
+    audit.createdByEmail = currentUser?.email || 'system@farmaciassaojoao.com.br';
+  }
+
   return {
     ...record,
+    ...audit,
     id: record.id || crypto.randomUUID(),
-    createdAt: record.createdAt || new Date().toISOString(),
     status: statusMap[rawStatus] || (rawStatus as TicketStatus),
     type: typeMap[rawType] || 'PRODUÇÃO',
     description: (record.description || '').trim(),
@@ -127,7 +145,7 @@ const normalizeRecord = (record: TicketRecord): TicketRecord => {
     externalUser: standardizeName(record.externalUser || ''),
     creatorUser: standardizeName(record.creatorUser || ''),
     isFormalRecurrent: !!(record.previousCaseId && String(record.previousCaseId).trim() && !['N/A', 'NA', '-', '0'].includes(String(record.previousCaseId).toUpperCase().trim()))
-  };
+  } as TicketRecord;
 };
 
 const App: React.FC = () => {
@@ -139,56 +157,282 @@ const App: React.FC = () => {
   const [users, setUsers] = useState<User[]>([]);
   const [userName, setUserName] = useState<string>(standardizeName(localStorage.getItem(USER_NAME_KEY) || ''));
   const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
+  const [userData, setUserData] = useState<User | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | React.ReactNode | null>(null);
+
+  // Login form states
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [registerName, setRegisterName] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
+  const [isForgotPassword, setIsForgotPassword] = useState(false);
+
+  // Audit Logger
+  const logAction = async (action: string, details: string, targetId?: string) => {
+    if (!currentUser) return;
+    try {
+      const logId = crypto.randomUUID();
+      await setDoc(doc(db, 'logs', logId), cleanData({
+        id: logId,
+        userId: currentUser.uid,
+        userName: userData?.name || 'Usuário',
+        userEmail: currentUser.email,
+        action,
+        details,
+        targetId,
+        timestamp: new Date().toISOString()
+      }));
+    } catch (e) {
+      console.error("Erro ao gravar log de auditoria:", e);
+    }
+  };
 
   // 1. Firebase Auth listener
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setCurrentUser(user);
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setIsAuthLoading(true);
+      setAuthError(null);
+      
       if (user) {
-        const name = standardizeName(user.displayName || user.email || '');
-        if (name) {
-          setUserName(name);
-        } else if (user.isAnonymous) {
-          setIsUserModalOpen(true);
+        try {
+          // Block non-corporate emails immediately
+          const email = (user.email || '').toLowerCase();
+          const isCorporate = email.endsWith('@farmaciassaojoao.com.br') || email === 'kerolin11siq@gmail.com';
+          
+          if (!isCorporate) {
+            await signOut(auth);
+            setAuthError("Apenas e-mails corporativos @farmaciassaojoao.com.br são permitidos.");
+            setCurrentUser(null);
+            setUserData(null);
+            setIsAuthLoading(false);
+            return;
+          }
+
+          // Verify if user is in authorized collection and active
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
+          if (!userDoc.exists()) {
+             // Block unauthorized users (No auto-registration)
+             await signOut(auth);
+             setAuthError("Sua conta não foi autorizada no sistema. Entre em contato com um administrador.");
+             setCurrentUser(null);
+             setUserData(null);
+          } else {
+            const data = userDoc.data() as User;
+            if (!data.isActive) {
+               await signOut(auth);
+               setAuthError("Sua conta está inativa. Entre em contato com um administrador.");
+               setCurrentUser(null);
+               setUserData(null);
+            } else {
+               setCurrentUser(user);
+               setUserData(data);
+               setUserName(data.name);
+               setDbStatus('ONLINE');
+
+               // Update last login
+               await updateDoc(doc(db, 'users', user.uid), {
+                 lastSeen: new Date().toISOString(),
+                 isOnline: true
+               });
+               
+               await logAction('LOGIN', 'Usuário realizou login no sistema');
+            }
+          }
+        } catch (error) {
+          console.error("Erro ao verificar usuário:", error);
+          setAuthError("Erro na autenticação. Verifique se sua conta foi cadastrada.");
+          setCurrentUser(null);
+          setUserData(null);
         }
-        setDbStatus('ONLINE');
       } else {
+        if (currentUser) {
+          await logAction('LOGOUT', 'Usuário realizou logout do sistema');
+        }
+        setCurrentUser(null);
+        setUserData(null);
         setDbStatus('OFFLINE');
       }
+      setIsAuthLoading(false);
     });
     return () => unsubscribe();
-  }, []);
+  }, [currentUser]);
 
   // 1.5. Sync Current User to Firestore for global visibility
   useEffect(() => {
     if (currentUser && userName && userName !== 'Usuário') {
-      const userObj: User = {
-        id: currentUser.uid,
-        name: userName,
-        photoURL: currentUser.photoURL || undefined
+      const updatePresence = async () => {
+        try {
+          await updateDoc(doc(db, 'users', currentUser.uid), {
+            lastSeen: new Date().toISOString(),
+            isOnline: true
+          });
+        } catch (e) {
+          console.error("Erro ao sincronizar presença do usuário:", e);
+        }
       };
-      setDoc(doc(db, 'users', currentUser.uid), cleanData(userObj), { merge: true })
-        .catch(e => console.error("Erro ao sincronizar usuário global:", e));
+
+      // Initial sync
+      updatePresence();
+
+      // Heartbeat every 2 minutes
+      const interval = setInterval(updatePresence, 120000);
+
+      return () => {
+        clearInterval(interval);
+        // Mark as offline when logging out or closing
+        updateDoc(doc(db, 'users', currentUser.uid), { isOnline: false })
+          .catch(() => {});
+      };
     }
   }, [currentUser, userName]);
 
-  const handleLogin = async (type: 'google' | 'anonymous' = 'google') => {
+  const handleBootstrapAdmin = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    
+    // If we're already logged in as the master email, we can proceed
+    const targetEmail = (currentUser?.email || loginEmail || '').toLowerCase().trim();
+
+    if (targetEmail !== 'kerolin.siqueira@farmaciassaojoao.com.br' && targetEmail !== 'kerolin11siq@gmail.com') {
+      const errorMsg = "Apenas o e-mail corporativo master pode realizar a configuração inicial.";
+      setAuthError(errorMsg);
+      alert(errorMsg);
+      return;
+    }
+
     try {
-      if (type === 'google') {
-        const provider = new GoogleAuthProvider();
-        await signInWithPopup(auth, provider);
-      } else {
-        await signInAnonymously(auth);
-        setIsUserModalOpen(true); // Ask for name for anonymous users
+      setAuthError(null);
+      setIsAuthLoading(true);
+      
+      let user = currentUser;
+      
+      // If not logged in, we need to log in or create
+      if (!user) {
+        if (!loginPassword) {
+          setAuthError("A senha deve ser preenchida para o login inicial.");
+          return;
+        }
+        try {
+          // Try to login first
+          const userCredential = await signInWithEmailAndPassword(auth, targetEmail, loginPassword);
+          user = userCredential.user;
+        } catch (signInErr: any) {
+          if (signInErr.code === 'auth/user-not-found' || signInErr.code === 'auth/invalid-credential') {
+            // Try to create the user if it doesn't exist or if credentials failed for master email (as first attempt)
+            try {
+              const userCredential = await createUserWithEmailAndPassword(auth, targetEmail, loginPassword);
+              user = userCredential.user;
+            } catch (createErr: any) {
+              throw createErr;
+            }
+          } else {
+            throw signInErr;
+          }
+        }
       }
-    } catch (error) {
+      
+      await updateProfile(user, { displayName: "KEROLIN SIQUEIRA" });
+      
+      const newUserData: User = {
+        id: user.uid,
+        name: "KEROLIN SIQUEIRA",
+        email: (user.email || targetEmail || '').toLowerCase().trim(),
+        isActive: true,
+        role: 'admin',
+        lastSeen: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        createdBy: 'system',
+        isOnline: true
+      };
+      
+      await setDoc(doc(db, 'users', user.uid), cleanData(newUserData));
+      alert("Administrador Master configurado com sucesso! Você já pode gerenciar os usuários.");
+      setUserData(newUserData);
+      setUserName(newUserData.name);
+    } catch (error: any) {
+      console.error("Erro ao configurar admin:", error);
+      if (error.code === 'auth/user-not-found') {
+        setAuthError("Usuário não encontrado. Use a senha definida no Firebase.");
+      } else {
+        setAuthError("Erro na configuração: " + error.message);
+      }
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleLogin = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!loginEmail || !loginPassword) {
+      setAuthError("Preencha e-mail e senha.");
+      return;
+    }
+
+    const email = loginEmail.toLowerCase().trim();
+    const isCorporate = email.endsWith('@farmaciassaojoao.com.br') || email === 'kerolin11siq@gmail.com';
+    
+    if (!isCorporate) {
+      setAuthError("Apenas e-mails corporativos @farmaciassaojoao.com.br são permitidos.");
+      return;
+    }
+
+    try {
+      setAuthError(null);
+      setIsAuthLoading(true);
+      await signInWithEmailAndPassword(auth, email, loginPassword);
+    } catch (error: any) {
       console.error("Erro ao fazer login:", error);
-      alert("Erro ao conectar. Verifique se o acesso anônimo está habilitado no Console do Firebase.");
+      if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
+        setAuthError("E-mail ou senha incorretos.");
+      } else if (error.code === 'auth/too-many-requests') {
+        setAuthError("Muitas tentativas. Tente novamente mais tarde.");
+      } else if (error.code === 'auth/operation-not-allowed') {
+        setAuthError("O login por e-mail/senha não está ativado no Firebase Console.");
+      } else if (error.code === 'auth/network-request-failed') {
+        setAuthError("Erro de rede ao conectar com o servidor de autenticação. Verifique sua internet.");
+      } else {
+        setAuthError(`Erro ao conectar: ${error.message || 'Erro desconhecido'} (${error.code || 'unknown'})`);
+      }
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleRegister = async () => {
+    setAuthError("O registro de contas é controlado por administradores.");
+  };
+
+  const handleGoogleLogin = async () => {
+    setAuthError("O login com Google não é permitido neste ambiente.");
+  };
+
+  const handlePasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginEmail) {
+      setAuthError("Informe seu e-mail para recuperar a senha.");
+      return;
+    }
+
+    try {
+      setAuthError(null);
+      setIsResettingPassword(true);
+      await sendPasswordResetEmail(auth, loginEmail);
+      alert("E-mail de recuperação enviado! Verifique sua caixa de entrada.");
+      setIsForgotPassword(false);
+    } catch (error: any) {
+      console.error("Erro ao recuperar senha:", error);
+      setAuthError("Erro ao enviar e-mail de recuperação.");
+    } finally {
+      setIsResettingPassword(false);
     }
   };
 
   const handleLogout = async () => {
     try {
+      if (currentUser) {
+        await updateDoc(doc(db, 'users', currentUser.uid), { isOnline: false });
+      }
       await signOut(auth);
       setUserName('');
       localStorage.removeItem(USER_NAME_KEY);
@@ -197,37 +441,7 @@ const App: React.FC = () => {
     }
   };
 
-  const syncUsersFromData = useCallback(() => {
-    // De records
-    records.forEach(r => {
-      if (r.user) syncUser(r.user);
-      if (r.creatorUser) syncUser(r.creatorUser);
-      if (r.externalUser) syncUser(r.externalUser);
-    });
-    
-    // De mural posts
-    muralPosts.forEach(p => {
-      if (p.userName) syncUser(p.userName);
-      p.comments.forEach(c => {
-        if (c.userName) syncUser(c.userName);
-      });
-    });
-    
-    // De tratativas
-    tratativas.forEach(t => {
-      if (t.responsible) syncUser(t.responsible);
-      if (t.usuario_criador) syncUser(t.usuario_criador);
-    });
-    
-    // De current session
-    if (userName) syncUser(userName);
-    
-    // Atualizar estado local de usuários
-    const storedUsers = JSON.parse(localStorage.getItem(USERS_LIST_KEY) || '[]');
-    setUsers(storedUsers);
-  }, [records, muralPosts, tratativas, userName]);
-
-  // 2. Real-time Firestore Sync
+    // 2. Real-time Firestore Sync
   useEffect(() => {
     if (!currentUser) return;
 
@@ -260,7 +474,7 @@ const App: React.FC = () => {
     // Listen to registered users for mentions
     const unsubUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
       const docs = snapshot.docs.map(doc => doc.data() as User);
-      setUsers(docs.sort((a, b) => a.name.localeCompare(b.name)));
+      setUsers(docs.sort((a, b) => (a.name || '').localeCompare(b.name || '')));
     });
 
     return () => {
@@ -314,6 +528,8 @@ const App: React.FC = () => {
     migrateToCloud();
   }, [currentUser]);
 
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
   const [isUserModalOpen, setIsUserModalOpen] = useState(false);
   const [dbStatus, setDbStatus] = useState<'ONLINE' | 'OFFLINE'>('ONLINE');
   const isLoaded = React.useRef(false);
@@ -358,13 +574,6 @@ const App: React.FC = () => {
     if (!currentUser) return;
     setDbStatus('ONLINE');
   }, [currentUser]);
-
-  // Sync users
-  useEffect(() => {
-    if (records.length > 0) {
-      syncUsersFromData();
-    }
-  }, [records, syncUsersFromData]);
 
   const isIndexingStarted = useRef(false);
 
@@ -532,7 +741,7 @@ const App: React.FC = () => {
       const term = searchTerm.toLowerCase().trim();
       if (!term) return true;
       return (
-        r.caseId.toLowerCase().includes(term) ||
+        (r.caseId || '').toLowerCase().includes(term) ||
         (r.subject || '').toLowerCase().includes(term) ||
         (r.normalizedCategory || '').toLowerCase().includes(term) ||
         (r.user || '').toLowerCase().includes(term) ||
@@ -666,17 +875,40 @@ const App: React.FC = () => {
     }
   };
 
+  const handleUpdatePassword = async () => {
+    if (!currentUser || !newPassword) return;
+    if (newPassword.length < 6) {
+      alert("A senha deve ter pelo menos 6 caracteres.");
+      return;
+    }
+    setIsChangingPassword(true);
+    try {
+      await updatePassword(currentUser, newPassword);
+      alert("Senha atualizada com sucesso!");
+      setNewPassword('');
+    } catch (error: any) {
+      console.error("Erro ao atualizar senha:", error);
+      if (error.code === 'auth/requires-recent-login') {
+        alert("Para sua segurança, esta operação exige um login recente. Por favor, saia e entre novamente antes de trocar sua senha.");
+      } else {
+        alert("Erro ao atualizar senha: " + error.message);
+      }
+    } finally {
+      setIsChangingPassword(false);
+    }
+  };
+
   const handleSaveUserName = async (name: string) => {
     const standardName = standardizeName(name);
     if (standardName) {
       setUserName(standardName);
       localStorage.setItem(USER_NAME_KEY, standardName);
-      syncUser(standardName);
       
       // Update Firebase Profile if logged in
       if (currentUser) {
         try {
           await updateProfile(currentUser, { displayName: standardName });
+          await logAction('PROFILE_UPDATE', `Nome alterado para: ${standardName}`);
           // Force a state refresh if needed, though onAuthStateChanged might handle it
         } catch (e) {
           console.error("Erro ao atualizar perfil:", e);
@@ -700,55 +932,104 @@ const App: React.FC = () => {
       finalCriticality = 'Atenção';
     }
 
+    const now = new Date().toISOString();
     const newPost: MuralPost = {
       id: (postData as any).id || crypto.randomUUID(),
       ...postData,
       userName: standardizeName(postData.userName),
       criticality: finalCriticality,
       type: finalCriticality as MuralPostType,
-      createdAt: new Date().toISOString(),
+      createdAt: now,
+      createdBy: currentUser?.uid || 'system',
+      createdByName: userData?.name || 'Sistema',
+      createdByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+      updatedAt: now,
+      updatedBy: currentUser?.uid || 'system',
+      updatedByName: userData?.name || 'Sistema',
+      updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
       comments: []
     };
     
     await setDoc(doc(db, 'muralPosts', newPost.id), cleanData(newPost));
-    syncUser(newPost.userName);
+    await logAction('MURAL_POST_CREATE', `Post criado: ${newPost.title}`, newPost.id);
 
     // Create notifications for mentions
     if (newPost.mentions && newPost.mentions.length > 0) {
       for (const mention of newPost.mentions) {
-        const notifId = crypto.randomUUID();
-        const notification: MuralNotification = {
-          id: notifId,
+        if (mention === currentUser?.uid) continue; // Don't notify self
+        await createNotification({
           userId: mention,
           authorName: newPost.userName,
           postId: newPost.id,
           postTitle: newPost.title,
-          type: 'mention',
-          read: false,
-          createdAt: new Date().toISOString()
-        };
-        await setDoc(doc(db, 'notifications', notifId), cleanData(notification));
+          type: 'mention'
+        });
       }
     }
   };
 
+  const createNotification = async (notif: Partial<MuralNotification>) => {
+    const id = crypto.randomUUID();
+    const notification = {
+      ...notif,
+      id,
+      read: false,
+      createdAt: new Date().toISOString()
+    };
+    try {
+      await setDoc(doc(db, 'notifications', id), cleanData(notification));
+    } catch (err) {
+      console.error("Erro ao criar notificação:", err);
+    }
+  };
+
   const handleUpdateMuralPost = async (updatedPost: MuralPost) => {
-    const standardizedPost = {
+    const now = new Date().toISOString();
+    
+    // Get existing post to compare for new comments or mentions
+    const existingPostDoc = await getDoc(doc(db, 'muralPosts', updatedPost.id));
+    const existingPost = existingPostDoc.exists() ? existingPostDoc.data() as MuralPost : null;
+
+    const standardizedPost: MuralPost = {
       ...updatedPost,
       userName: standardizeName(updatedPost.userName),
+      updatedAt: now,
+      updatedBy: currentUser?.uid || 'system',
+      updatedByName: userData?.name || 'Sistema',
+      updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
       comments: updatedPost.comments.map(c => ({
         ...c,
-        userName: standardizeName(c.userName)
+        userName: standardizeName(c.userName),
+        createdBy: c.createdBy || currentUser?.uid || 'system',
+        createdByName: c.createdByName || userData?.name || 'Sistema',
+        createdByEmail: c.createdByEmail || currentUser?.email || 'system@farmaciassaojoao.com.br',
+        createdAt: c.createdAt || now
       }))
     };
+    
     await setDoc(doc(db, 'muralPosts', standardizedPost.id), cleanData(standardizedPost));
-    syncUser(standardizedPost.userName);
-    standardizedPost.comments.forEach(c => syncUser(c.userName));
+    await logAction('MURAL_POST_UPDATE', `Post atualizado: ${standardizedPost.title}`, standardizedPost.id);
+
+    // Notify of new comments
+    if (existingPost && standardizedPost.comments.length > existingPost.comments.length) {
+      const newComment = standardizedPost.comments[standardizedPost.comments.length - 1];
+      // Notify post author if it's not the same person
+      if (standardizedPost.userId !== newComment.userId) {
+        await createNotification({
+          userId: standardizedPost.userId,
+          authorName: newComment.userName,
+          postId: standardizedPost.id,
+          postTitle: standardizedPost.title,
+          type: 'comment'
+        });
+      }
+    }
   };
 
   const handleDeleteMuralPost = async (postId: string) => {
     if (window.confirm('Deseja realmente excluir esta postagem?')) {
       await deleteDoc(doc(db, 'muralPosts', postId));
+      await logAction('MURAL_POST_DELETE', `Post excluído`, postId);
     }
   };
 
@@ -763,13 +1044,19 @@ const App: React.FC = () => {
     setIsFormOpen(true);
   };
 
-  const handleViewCarga = (userName: string, type: 'total' | 'waiting' | 'stale') => {
+  const handleViewCarga = (userName: string, type: 'total' | 'waiting' | 'stale' | 'devolvidos') => {
     resetFilters();
-    setSolicitantFilter(userName.toUpperCase());
+    if (userName) {
+      setSolicitantFilter(userName.toUpperCase());
+    }
+
     if (type === 'waiting') {
       setOnlyAguardandoRetorno(true);
     } else if (type === 'stale') {
       setOnlySemMovimentacao(true);
+    } else if (type === 'devolvidos') {
+      setRecurrenceFilter('RETRABALHO');
+      setOnlyDevolvidos(true);
     }
     setActiveTab('table');
   };
@@ -793,14 +1080,22 @@ const App: React.FC = () => {
   };
 
   const handleAddTreatment = async (treatment: MuralTreatment) => {
-    const standardizedTreatment = {
+    const now = new Date().toISOString();
+    const standardizedTreatment: MuralTreatment = {
       ...treatment,
       responsible: standardizeName(treatment.responsible),
-      usuario_criador: standardizeName(treatment.usuario_criador)
+      usuario_criador: standardizeName(treatment.usuario_criador),
+      createdBy: currentUser?.uid || 'system',
+      createdByName: userData?.name || 'Sistema',
+      createdByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+      createdAt: now,
+      updatedBy: currentUser?.uid || 'system',
+      updatedByName: userData?.name || 'Sistema',
+      updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+      updatedAt: now
     };
     await setDoc(doc(db, 'treatments', standardizedTreatment.id), cleanData(standardizedTreatment));
-    syncUser(standardizedTreatment.responsible);
-    syncUser(standardizedTreatment.usuario_criador);
+    await logAction('TREATMENT_CREATE', `Tratativa criada: ${standardizedTreatment.title}`, standardizedTreatment.id);
 
     // AI Studio Sync: Automatic Mural Post implementation
     const caseId = standardizedTreatment.case_numero;
@@ -823,6 +1118,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
 
       if (existingPost) {
         // Update existing post to link the treatment and update context
+        const nowPost = new Date().toISOString();
         const updatedPost: MuralPost = {
           ...existingPost,
           title: postTitle,
@@ -830,17 +1126,29 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
           status: 'Em acompanhamento',
           treatment: standardizedTreatment,
           criticality: standardizedTreatment.priority,
-          type: standardizedTreatment.priority as any
+          type: standardizedTreatment.priority as any,
+          updatedAt: nowPost,
+          updatedBy: currentUser?.uid || 'system',
+          updatedByName: userData?.name || 'Sistema',
+          updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br'
         };
         await setDoc(doc(db, 'muralPosts', updatedPost.id), cleanData(updatedPost));
       } else {
         // Create new post
         const newPostId = crypto.randomUUID();
+        const nowPost = new Date().toISOString();
         const newPost: MuralPost = {
           id: newPostId,
-          userId: standardizedTreatment.usuario_criador,
+          userId: currentUser?.uid || 'system',
           userName: standardizedTreatment.usuario_criador,
-          createdAt: new Date().toISOString(),
+          createdAt: nowPost,
+          createdBy: currentUser?.uid || 'system',
+          createdByName: userData?.name || 'Sistema',
+          createdByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+          updatedBy: currentUser?.uid || 'system',
+          updatedByName: userData?.name || 'Sistema',
+          updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+          updatedAt: nowPost,
           type: standardizedTreatment.priority as any,
           title: postTitle,
           description: postDescription,
@@ -859,14 +1167,18 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
   };
 
   const handleUpdateTreatment = async (updatedTreatment: MuralTreatment) => {
-    const standardizedTreatment = {
+    const now = new Date().toISOString();
+    const standardizedTreatment: MuralTreatment = {
       ...updatedTreatment,
       responsible: standardizeName(updatedTreatment.responsible),
-      usuario_criador: standardizeName(updatedTreatment.usuario_criador)
+      usuario_criador: standardizeName(updatedTreatment.usuario_criador),
+      updatedBy: currentUser?.uid || 'system',
+      updatedByName: userData?.name || 'Sistema',
+      updatedByEmail: currentUser?.email || 'system@farmaciassaojoao.com.br',
+      updatedAt: now
     };
     await setDoc(doc(db, 'treatments', standardizedTreatment.id), cleanData(standardizedTreatment));
-    syncUser(standardizedTreatment.responsible);
-    syncUser(standardizedTreatment.usuario_criador);
+    await logAction('TREATMENT_UPDATE', `Tratativa atualizada: ${standardizedTreatment.title}`, standardizedTreatment.id);
 
     // Sync updates to corresponding Mural Post
     const caseId = standardizedTreatment.case_numero;
@@ -901,6 +1213,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
   const handleDeleteTreatment = async (treatmentId: string) => {
     if (window.confirm('Deseja realmente excluir esta tratativa?')) {
       await deleteDoc(doc(db, 'treatments', treatmentId));
+      await logAction('TREATMENT_DELETE', `Tratativa excluída`, treatmentId);
     }
   };
 
@@ -940,11 +1253,30 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
   };
 
   const handleNotificationClick = async (notification: MuralNotification) => {
-    setActiveTab('mural');
-    setSearchTerm(notification.postTitle);
     await updateDoc(doc(db, 'notifications', notification.id), { read: true });
+    await logAction('NOTIFICATION_CLICK', `Notificação lida: ${notification.postTitle}`, notification.id);
+    
+    if (notification.postId) {
+      setInitialMuralFilters({ search: notification.postTitle });
+      setActiveTab('mural');
+    } else if (notification.caseId) {
+      setSearchTerm(notification.caseId);
+      setActiveTab('table');
+    } else {
+      setActiveTab('mural');
+      setSearchTerm(notification.postTitle);
+    }
   };
 
+  const handleClearNotifications = async () => {
+    const mine = notifications.filter(n => !n.read && (n.userId === userName || n.userId === 'Todos'));
+    if (mine.length === 0) return;
+    
+    for (const n of mine) {
+      await updateDoc(doc(db, 'notifications', n.id), { read: true });
+    }
+    await logAction('NOTIFICATIONS_CLEAR', `Limpou ${mine.length} notificações`);
+  };
   const handleSendCaseToMural = (record: TicketRecord, createTreatment: boolean = false) => {
     const isCritical = record.status === 'DEVOLVIDO' || !!record.previousCaseId;
     const suggestedPriority = isCritical ? 'Ação necessária' : 'Informativo';
@@ -962,14 +1294,6 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
     setActiveTab('mural');
   };
 
-  const handleClearNotifications = async () => {
-    for (const n of notifications) {
-      if (!n.read) {
-        await updateDoc(doc(db, 'notifications', n.id), { read: true });
-      }
-    }
-  };
-
   const handleExportCSV = () => {
     if (filteredRecords.length === 0) return alert('Sem dados.');
     const headers = ['CASE ID', 'TIPO', 'CASE ANTE', 'DATA ABERTURA', 'DATA RETORNO', 'ANALISTA SOVOS', 'FSJ SOLICITANTE', 'STATUS', 'DESCRICAO'];
@@ -980,6 +1304,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
     link.href = URL.createObjectURL(blob);
     link.download = `FSJ_Export_${Date.now()}.csv`;
     link.click();
+    logAction('EXPORT_CSV', `Exportação CSV realizada: ${filteredRecords.length} registros`);
   };
 
   const handleExportJSON = () => {
@@ -988,6 +1313,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
     link.href = URL.createObjectURL(blob);
     link.download = `BACKUP_FSJ_${Date.now()}.json`;
     link.click();
+    logAction('EXPORT_JSON', `Backup JSON realizado: ${records.length} registros`);
   };
 
   const hasActiveFilters = searchTerm !== '' || statusFilter !== 'ALL' || typeFilter !== 'ALL' || userFilter !== 'ALL' || solicitantFilter !== 'ALL' || slaLevelFilter !== 'ALL' || recurrenceFilter !== 'ALL' || tagFilter !== 'ALL' || subjectFilter !== 'ALL' || startDate !== '' || endDate !== '' || retStartDate !== '' || retEndDate !== '' || lineageFilter !== null || onlyAguardandoRetorno || onlySemMovimentacao;
@@ -1004,8 +1330,190 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
     return calculateAutomaticAlerts(currentPeriod, muralPosts, prevPeriod, tratativas);
   }, [records, muralPosts, tratativas]);
 
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen bg-[#F8FAFC] flex items-center justify-center p-4">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-[#003DA5] border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-[10px] font-black uppercase tracking-widest text-[#003DA5]">Verificando Credenciais...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-[#F8FAFC] flex items-center justify-center p-4">
+        <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md overflow-hidden border-[8px] border-white text-center">
+          <div className="bg-[#003DA5] p-12 text-white">
+            <div className="bg-white/20 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto mb-6 shadow-xl backdrop-blur-sm">
+              <ShieldCheck className="w-10 h-10" />
+            </div>
+            <h1 className="text-3xl font-black uppercase tracking-tight mb-2">Monitor FSJ</h1>
+            <p className="text-[10px] font-bold text-blue-200 uppercase tracking-[0.3em]">Ambiente Colaborativo Restrito</p>
+          </div>
+          
+          <div className="p-10 space-y-6">
+            {isForgotPassword ? (
+              <form onSubmit={handlePasswordReset} className="space-y-6 animate-in slide-in-from-right duration-300">
+                <div className="text-left space-y-2">
+                  <h2 className="text-lg font-black text-slate-800 uppercase tracking-tight">Recuperar Senha</h2>
+                  <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest leading-relaxed">
+                    Informe seu e-mail corporativo para receber as instruções.
+                  </p>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="space-y-1 text-left">
+                    <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">E-mail Corporativo</label>
+                    <input 
+                      type="email" 
+                      value={loginEmail}
+                      onChange={(e) => setLoginEmail(e.target.value)}
+                      placeholder="email@farmaciassaojoao.com.br"
+                      className="w-full px-5 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold text-sm outline-none focus:border-[#003DA5] transition-all"
+                      required
+                    />
+                  </div>
+                </div>
+
+                {authError && (
+                  <div className="bg-red-50 border border-red-100 p-4 rounded-xl flex items-center gap-3 animate-in fade-in duration-300">
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                    <div className="text-[10px] text-red-700 font-bold uppercase text-left leading-relaxed">
+                      {authError}
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  <button 
+                    disabled={isResettingPassword}
+                    className="w-full py-4 bg-[#003DA5] text-white font-black uppercase text-xs rounded-2xl shadow-xl hover:bg-blue-800 transition-all disabled:opacity-50"
+                  >
+                    {isResettingPassword ? 'Enviando...' : 'Enviar Recuperação'}
+                  </button>
+                  <button 
+                    type="button"
+                    onClick={() => { setIsForgotPassword(false); setAuthError(null); }}
+                    className="w-full py-2 text-[10px] font-black text-slate-400 uppercase hover:text-slate-600 transition-all"
+                  >
+                    Voltar ao Login
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={isRegistering ? handleRegister : handleLogin} className="space-y-6 animate-in fade-in duration-500">
+                <div className="text-left space-y-2">
+                  <h2 className="text-lg font-black text-slate-800 uppercase tracking-tight">
+                    {isRegistering ? 'Criar Nova Conta' : 'Acesso ao Sistema'}
+                  </h2>
+                  <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest leading-relaxed">
+                    {isRegistering ? 'Preencha seus dados para começar.' : 'Entre com seu e-mail interno e senha.'}
+                  </p>
+                </div>
+
+                <div className="space-y-4">
+                  {isRegistering && (
+                    <div className="space-y-1 text-left">
+                      <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Seu Nome</label>
+                      <div className="relative">
+                        <Users className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+                        <input 
+                          type="text" 
+                          value={registerName}
+                          onChange={(e) => setRegisterName(e.target.value)}
+                          placeholder="Ex: João Silva"
+                          className="w-full pl-12 pr-5 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold text-sm outline-none focus:border-[#003DA5] transition-all"
+                          required
+                        />
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div className="space-y-1 text-left">
+                    <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">E-mail Corporativo</label>
+                    <div className="relative">
+                      <LogIn className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+                      <input 
+                        type="email" 
+                        value={loginEmail}
+                        onChange={(e) => setLoginEmail(e.target.value)}
+                        placeholder="email@farmaciassaojoao.com.br"
+                        className="w-full pl-12 pr-5 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold text-sm outline-none focus:border-[#003DA5] transition-all"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-1 text-left">
+                    <div className="flex justify-between items-center mb-1">
+                      <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1">Senha</label>
+                      {!isResettingPassword && (
+                        <button 
+                          type="button"
+                          onClick={() => { setIsForgotPassword(true); setAuthError(null); }}
+                          className="text-[9px] font-black text-[#003DA5] uppercase hover:underline"
+                        >
+                          Esqueci minha senha
+                        </button>
+                      )}
+                    </div>
+                    <div className="relative">
+                      <ShieldCheck className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+                      <input 
+                        type="password" 
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                        placeholder="••••••••"
+                        className="w-full pl-12 pr-5 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold text-sm outline-none focus:border-[#003DA5] transition-all"
+                        required
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {authError && (
+                  <div className="bg-red-50 border border-red-100 p-4 rounded-xl flex items-center gap-3">
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                    <p className="text-[10px] text-red-700 font-bold uppercase text-left">{authError}</p>
+                  </div>
+                )}
+
+                <button 
+                  className="w-full py-4 bg-[#003DA5] text-white font-black uppercase text-xs rounded-2xl shadow-xl hover:bg-blue-800 transition-all active:scale-[0.98]"
+                >
+                  Entrar no Sistema
+                </button>
+
+                {users.length === 0 && (
+                  <div className="pt-4 border-t border-slate-100 mt-4">
+                    <p className="text-[8px] font-black uppercase text-slate-400 text-center mb-3 tracking-widest">Nenhum usuário detectado</p>
+                    <button 
+                      type="button"
+                      onClick={handleBootstrapAdmin}
+                      className="w-full py-4 bg-emerald-600 text-white font-black uppercase text-[10px] rounded-2xl shadow-lg hover:bg-emerald-700 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
+                    >
+                      <ShieldCheck className="w-4 h-4" />
+                      Configurar Primeiro Administrador
+                    </button>
+                    <p className="text-[7px] font-bold text-slate-400 text-center mt-2 uppercase">Apenas para: kerolin.siqueira@farmaciassaojoao.com.br</p>
+                  </div>
+                )}
+              </form>
+            )}
+
+              <div className="pt-4 flex items-center justify-center gap-2 grayscale opacity-50">
+                <ShieldCheck className="w-3 h-3 text-slate-400" />
+                <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Controle de Acesso SOVOS</p>
+              </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen flex flex-col bg-[#F1F5F9]">
+    <div className="min-h-screen flex flex-col bg-slate-50">
       <Header 
         activeTab={activeTab} 
         onTabChange={setActiveTab} 
@@ -1016,8 +1524,13 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
         onNotificationClick={handleNotificationClick}
         onClearNotifications={handleClearNotifications}
         currentUser={currentUser}
-        onLogin={handleLogin}
+        userData={userData}
+        onLogin={(type) => {
+          handleLogin();
+        }}
         onLogout={handleLogout}
+        onBootstrap={() => handleBootstrapAdmin()}
+        users={users}
       />
 
       {/* GLOBAL ALERTS BAR */}
@@ -1108,7 +1621,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
                 </select>
               </div>
               <div className="space-y-1">
-                <label className="text-[8px] font-black text-gray-950 uppercase ml-2">Analista Sovos</label>
+                <label className="text-[8px] font-black text-gray-950 uppercase ml-2">Analista SOVOS</label>
                 <select value={userFilter} onChange={(e) => setUserFilter(e.target.value)} className="w-full px-4 py-2.5 bg-gray-50 border-2 border-gray-500 rounded-xl text-[10px] font-black uppercase text-gray-900 outline-none focus:border-blue-700 transition-all">
                   <option value="ALL">TODOS ANALISTAS</option>
                   {uniqueData.users.map(u => <option key={u} value={u}>{u}</option>)}
@@ -1205,6 +1718,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
             records={baseAnalitica}
             userName={userName}
             users={users}
+            currentUser={currentUser}
             searchTerm={searchTerm}
             tratativas={tratativas}
             onAddTreatment={handleAddTreatment}
@@ -1226,6 +1740,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
             onOpenCase={handleLocateLineage}
             onAddTreatment={handleAddTreatment}
             userName={userName}
+            currentUser={currentUser}
           />
         ) : activeTab === 'table' ? (
           <DataTable 
@@ -1233,6 +1748,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
             onDelete={async (id) => {
               if (window.confirm('Excluir registro?')) {
                 await deleteDoc(doc(db, 'tickets', id));
+                await logAction('TICKET_DELETE', `Ticket excluído`, id);
               }
             }} 
             onEdit={(r) => { setEditingRecord(r); setIsFormOpen(true); }} 
@@ -1240,6 +1756,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
             onAddTreatment={handleAddTreatment}
             onSendToMural={handleSendCaseToMural}
             currentUserName={userName}
+            currentUser={currentUser}
             isRetrabalhoFilterActive={recurrenceFilter === 'RETRABALHO'}
           />
         ) : activeTab === 'management' ? (
@@ -1255,10 +1772,15 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
             onOpenCase={handleLocateLineage}
             onAddTreatment={handleAddTreatment}
           />
+        ) : activeTab === 'users' ? (
+          <UserManagement 
+            users={users}
+            currentUser={currentUser}
+          />
         ) : (
           <Dashboard 
-            records={contextRecords} 
-            contextRecords={baseAnalitica}
+            records={baseAnalitica} 
+            contextRecords={contextRecords}
             onLocateLineage={handleLocateLineage} 
             onFilterAction={handleDashboardFilter} 
             dateFilters={{ startDate, endDate, retStartDate, retEndDate }}
@@ -1278,25 +1800,23 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
               creatorUser: standardizeName(data.creatorUser || userName)
             };
 
-            syncUser(standardizedData.user);
-            syncUser(standardizedData.creatorUser);
-
             const existingIndex = records.findIndex(r => String(r.caseId || "").trim() === key);
             let updatedRecord: TicketRecord;
 
             if (existingIndex !== -1) {
-              updatedRecord = normalizeRecord({ ...records[existingIndex], ...standardizedData, caseId: key });
+              updatedRecord = normalizeRecord({ ...records[existingIndex], ...standardizedData, caseId: key }, currentUser);
               await setDoc(doc(db, 'tickets', updatedRecord.id), cleanData(updatedRecord));
+              await logAction('TICKET_UPDATE', `Ticket atualizado: Case ${key}`, updatedRecord.id);
             } else {
               updatedRecord = normalizeRecord({ 
                 ...standardizedData, 
                 id: crypto.randomUUID(), 
                 caseId: key,
                 creatorUser: standardizedData.creatorUser,
-                createdAt: new Date().toISOString(),
                 origin: data.origin || 'manual'
-              } as TicketRecord);
+              } as TicketRecord, currentUser);
               await setDoc(doc(db, 'tickets', updatedRecord.id), cleanData(updatedRecord));
+              await logAction('TICKET_CREATE', `Ticket criado: Case ${key}`, updatedRecord.id);
             }
             
             triggerLearning(updatedRecord);
@@ -1309,6 +1829,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
           kb={kb}
           users={users}
           defaultUser={userName}
+          currentUser={currentUser}
           muralPosts={muralPosts}
           onAddTreatment={handleAddTreatment}
           onSendToMural={(record, createTreatment) => {
@@ -1327,24 +1848,56 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
               <p className="text-[10px] font-bold opacity-80 uppercase tracking-widest">Informe seu nome para continuar</p>
             </div>
             <div className="p-8 space-y-6">
-              <div className="space-y-2">
-                <label className="block text-[10px] font-black text-gray-950 uppercase tracking-widest">Nome do Usuário</label>
-                <input 
-                  autoFocus
-                  type="text" 
-                  value={userName} 
-                  onChange={(e) => setUserName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSaveUserName(userName)}
-                  placeholder="Seu nome completo ou apelido"
-                  className="w-full px-5 py-4 bg-gray-50 border-2 border-gray-200 rounded-2xl font-bold text-gray-900 outline-none focus:border-[#003DA5] transition-all"
-                />
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className="block text-[10px] font-black text-gray-950 uppercase tracking-widest">Nome do Usuário</label>
+                  <input 
+                    autoFocus
+                    type="text" 
+                    value={userName} 
+                    onChange={(e) => setUserName(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleSaveUserName(userName)}
+                    placeholder="Seu nome completo ou apelido"
+                    className="w-full px-5 py-4 bg-gray-50 border-2 border-gray-200 rounded-2xl font-bold text-gray-900 outline-none focus:border-[#003DA5] transition-all"
+                  />
+                </div>
+                <button 
+                  onClick={() => handleSaveUserName(userName)}
+                  disabled={!userName.trim()}
+                  className="w-full py-4 bg-[#003DA5] text-white font-black uppercase text-xs rounded-2xl shadow-xl hover:bg-blue-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Confirmar Identificação
+                </button>
               </div>
+
+              <div className="pt-6 border-t border-slate-100 space-y-4">
+                <div className="space-y-2">
+                  <label className="block text-[10px] font-black text-gray-950 uppercase tracking-widest">Alterar Senha</label>
+                  <div className="relative">
+                    <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+                    <input 
+                      type="password" 
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      placeholder="Nova senha (min. 6 carac.)"
+                      className="w-full pl-12 pr-5 py-3 bg-gray-50 border-2 border-slate-100 rounded-2xl font-bold text-sm outline-none focus:border-[#003DA5] transition-all"
+                    />
+                  </div>
+                </div>
+                <button 
+                  onClick={handleUpdatePassword}
+                  disabled={!newPassword || isChangingPassword}
+                  className="w-full py-4 border-2 border-blue-600 text-[#003DA5] font-black uppercase text-[10px] rounded-2xl hover:bg-blue-50 transition-all disabled:opacity-50"
+                >
+                  {isChangingPassword ? 'Processando...' : 'Atualizar Minha Senha'}
+                </button>
+              </div>
+              
               <button 
-                onClick={() => handleSaveUserName(userName)}
-                disabled={!userName.trim()}
-                className="w-full py-4 bg-[#003DA5] text-white font-black uppercase text-xs rounded-2xl shadow-xl hover:bg-blue-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={() => setIsUserModalOpen(false)}
+                className="w-full py-2 text-[9px] font-black text-slate-400 uppercase tracking-widest hover:text-slate-600"
               >
-                Confirmar Identificação
+                Fechar
               </button>
             </div>
           </div>
@@ -1374,16 +1927,14 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
                 const key = String(r.caseId || "").trim();
                 if (!key) return;
 
-                if (r.user) syncUser(r.user);
-
                 let finalRecord: TicketRecord;
                 if (recordsMap.has(key)) {
                   const existing = recordsMap.get(key)!;
-                  finalRecord = normalizeRecord({ ...existing, ...r, id: existing.id, caseId: key });
+                  finalRecord = normalizeRecord({ ...existing, ...r, id: existing.id, caseId: key }, currentUser);
                   await setDoc(doc(db, 'tickets', finalRecord.id), cleanData(finalRecord));
                   updatedCount++;
                 } else {
-                  finalRecord = normalizeRecord({ ...r, caseId: key });
+                  finalRecord = normalizeRecord({ ...r, caseId: key }, currentUser);
                   await setDoc(doc(db, 'tickets', finalRecord.id), cleanData(finalRecord));
                   newCount++;
                 }
@@ -1408,6 +1959,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
             );
           }} 
           onClose={() => setIsImportModalOpen(false)} 
+          currentUser={currentUser}
         />
       )}
 
@@ -1470,7 +2022,7 @@ ${standardizedTreatment.deadline ? `- Prazo: ${standardizedTreatment.deadline}` 
         <div className="max-w-7xl mx-auto px-4 flex flex-col md:flex-row items-center justify-between gap-6">
            <div className="flex items-center gap-3 text-[11px] font-black text-gray-900 uppercase tracking-widest">
               <ShieldCheck className="w-5 h-5 text-[#003DA5]" />
-              FSJ Acompanhamento de Cases Sovos &copy; {new Date().getFullYear()}
+              FSJ Acompanhamento de Cases SOVOS &copy; {new Date().getFullYear()}
            </div>
            <div className="flex flex-wrap items-center justify-center gap-8 text-[10px] font-black">
               <span className="flex items-center gap-2 text-[#003DA5] font-black"><div className="w-2.5 h-2.5 rounded-full bg-emerald-600" /> SLA MONITOR ATIVO</span>

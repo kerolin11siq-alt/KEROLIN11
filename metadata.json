@@ -1,5 +1,5 @@
 {
-  "name": "FSJ - Monitor de Cases Sovos",
-  "description": "Painel estratégico para gestão de chamados, controle de SLA (RFT), métricas de retrabalho e análise de produtividade Sovos.",
+  "name": "FSJ Monitor - SOVOS",
+  "description": "Painel estratégico para gestão de chamados, controle de SLA (RFT), métricas de retrabalho e análise de produtividade (Analistas SOVOS).",
   "requestFramePermissions": []
 }

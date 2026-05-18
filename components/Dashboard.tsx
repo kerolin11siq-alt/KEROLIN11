@@ -145,6 +145,7 @@ type DashboardTab = 'general' | 'productivity' | 'bottlenecks' | 'cycle' | 'risk
 const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocateLineage, onFilterAction, dateFilters }) => {
   const [activeTab, setActiveTab] = useState<DashboardTab>('general');
   const [selectedCycleMonth, setSelectedCycleMonth] = useState<string | null>(null);
+  const detailsRef = React.useRef<HTMLDivElement>(null);
   const today = useMemo(() => startOfDay(new Date()), []);
 
   // Auxiliar para identificar retrabalho dinamicamente baseado em palavras-chave na OBS
@@ -226,6 +227,48 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
 
       const monthlyQuality = new Map<string, { total: number, withoutRework: number }>();
       
+      const generalRiskStats = { noPrazo: 0, alerta: 0, critico: 0, total: 0, sumSla: 0, maxSla: 0, minSla: Infinity };
+      records.forEach(r => {
+        const od = robustDateParse(r.openingDate);
+        if (od) {
+          const startOfOpen = startOfDay(od);
+          const retD = robustDateParse(r.returnDate);
+          const concD = robustDateParse(r.conclusionDate);
+          const conclusionDate = retD ? startOfDay(retD) : (concD ? startOfDay(concD) : today);
+          const conclusionDiff = Math.abs(differenceInDays(conclusionDate, startOfOpen));
+
+          generalRiskStats.total++;
+          generalRiskStats.sumSla += conclusionDiff;
+          if (conclusionDiff > generalRiskStats.maxSla) generalRiskStats.maxSla = conclusionDiff;
+          if (conclusionDiff < generalRiskStats.minSla) generalRiskStats.minSla = conclusionDiff;
+
+          if (conclusionDiff <= 5) generalRiskStats.noPrazo++;
+          else if (conclusionDiff <= 9) generalRiskStats.alerta++;
+          else generalRiskStats.critico++;
+        }
+      });
+
+      const filteredRiskStats = { noPrazo: 0, alerta: 0, critico: 0, total: 0, sumSla: 0, maxSla: 0, minSla: Infinity };
+      contextRecords.forEach(r => {
+        const od = robustDateParse(r.openingDate);
+        if (od) {
+          const startOfOpen = startOfDay(od);
+          const retD = robustDateParse(r.returnDate);
+          const concD = robustDateParse(r.conclusionDate);
+          const conclusionDate = retD ? startOfDay(retD) : (concD ? startOfDay(concD) : today);
+          const conclusionDiff = Math.abs(differenceInDays(conclusionDate, startOfOpen));
+
+          filteredRiskStats.total++;
+          filteredRiskStats.sumSla += conclusionDiff;
+          if (conclusionDiff > filteredRiskStats.maxSla) filteredRiskStats.maxSla = conclusionDiff;
+          if (conclusionDiff < filteredRiskStats.minSla) filteredRiskStats.minSla = conclusionDiff;
+
+          if (conclusionDiff <= 5) filteredRiskStats.noPrazo++;
+          else if (conclusionDiff <= 9) filteredRiskStats.alerta++;
+          else filteredRiskStats.critico++;
+        }
+      });
+
       // Para tendências de risco baseadas no filtro atual
       const currentMonthRiskStats = { noPrazo: 0, alerta: 0, critico: 0 };
       const prevRiskStats = { noPrazo: 0, alerta: 0, critico: 0 };
@@ -487,6 +530,22 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
         avgConclusion: m.total > 0 ? (m.sumConclusion / m.total).toFixed(1) : '0.0'
       }));
 
+      const lastMonthData = monthlyMap.get(currentMonthKey);
+      const avgSlaMonthly = lastMonthData && lastMonthData.total > 0 
+        ? (lastMonthData.sumConclusion / lastMonthData.total).toFixed(1) 
+        : '0.0';
+      
+      const avgSlaValue = validRecordsCount > 0 ? (totalSlaSum / validRecordsCount) : 0;
+      const avgSlaMonthlyValue = parseFloat(avgSlaMonthly);
+      
+      let slaDiffPercent = 0;
+      let slaComparisonTrend: 'BETTER' | 'WORSE' | 'STABLE' = 'STABLE';
+      
+      if (avgSlaValue > 0 && avgSlaMonthlyValue > 0) {
+        slaDiffPercent = Math.abs(((avgSlaMonthlyValue - avgSlaValue) / avgSlaValue) * 100);
+        slaComparisonTrend = avgSlaMonthlyValue < avgSlaValue ? 'BETTER' : (avgSlaMonthlyValue > avgSlaValue ? 'WORSE' : 'STABLE');
+      }
+
       const concAvgs = cycleTimeData.map(d => parseFloat(d.avgConclusion)).filter(v => v > 0);
       
       const cycleSummary = {
@@ -555,11 +614,34 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
 
       return { 
         total: records.length, validRecordsCount, efficiencyIndex, efficiencyLabel: isSlaLevelFilterActive ? 'Participação' : 'Conformidade',
-        ctxNoPrazo, ctxAlerta, ctxCritico,
-        ctxNoPrazoPct: contextRecords.length > 0 ? ((ctxNoPrazo / contextRecords.length) * 100).toFixed(0) : '0',
-        ctxAlertaPct: contextRecords.length > 0 ? ((ctxAlerta / contextRecords.length) * 100).toFixed(0) : '0',
-        ctxCriticoPct: contextRecords.length > 0 ? ((ctxCritico / contextRecords.length) * 100).toFixed(0) : '0',
+        ctxNoPrazo: filteredRiskStats.noPrazo, 
+        ctxAlerta: filteredRiskStats.alerta, 
+        ctxCritico: filteredRiskStats.critico,
+        ctxNoPrazoPct: filteredRiskStats.total > 0 ? ((filteredRiskStats.noPrazo / filteredRiskStats.total) * 100).toFixed(0) : '0',
+        ctxAlertaPct: filteredRiskStats.total > 0 ? ((filteredRiskStats.alerta / filteredRiskStats.total) * 100).toFixed(0) : '0',
+        ctxCriticoPct: filteredRiskStats.total > 0 ? ((filteredRiskStats.critico / filteredRiskStats.total) * 100).toFixed(0) : '0',
+        generalRiskStats,
+        generalRiskStatsPct: {
+          noPrazo: generalRiskStats.total > 0 ? ((generalRiskStats.noPrazo / generalRiskStats.total) * 100).toFixed(0) : '0',
+          alerta: generalRiskStats.total > 0 ? ((generalRiskStats.alerta / generalRiskStats.total) * 100).toFixed(0) : '0',
+          critico: generalRiskStats.total > 0 ? ((generalRiskStats.critico / generalRiskStats.total) * 100).toFixed(0) : '0',
+          avg: generalRiskStats.total > 0 ? (generalRiskStats.sumSla / generalRiskStats.total).toFixed(1) : '0.0',
+          max: generalRiskStats.maxSla,
+          min: generalRiskStats.minSla === Infinity ? 0 : generalRiskStats.minSla
+        },
+        filteredRiskStats,
+        filteredRiskStatsPct: {
+          noPrazo: filteredRiskStats.total > 0 ? ((filteredRiskStats.noPrazo / filteredRiskStats.total) * 100).toFixed(0) : '0',
+          alerta: filteredRiskStats.total > 0 ? ((filteredRiskStats.alerta / filteredRiskStats.total) * 100).toFixed(0) : '0',
+          critico: filteredRiskStats.total > 0 ? ((filteredRiskStats.critico / filteredRiskStats.total) * 100).toFixed(0) : '0',
+          avg: filteredRiskStats.total > 0 ? (filteredRiskStats.sumSla / filteredRiskStats.total).toFixed(1) : '0.0',
+          max: filteredRiskStats.maxSla,
+          min: filteredRiskStats.minSla === Infinity ? 0 : filteredRiskStats.minSla
+        },
         avgSla: validRecordsCount > 0 ? (totalSlaSum / validRecordsCount).toFixed(1) : '0.0',
+        avgSlaMonthly,
+        slaDiffPercent: slaDiffPercent.toFixed(0),
+        slaComparisonTrend,
         maxSlaDays, minSlaFinal: minSlaDays === Infinity ? 0 : minSlaDays,
         statusChart: ['ABERTO', 'CONCLUÍDO', 'DEVOLVIDO'].map(name => {
           const count = statusCounts[name] || 0;
@@ -637,27 +719,236 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
           {/* TOP KPIs */}
           <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
             <div className="xl:col-span-2 bg-white p-8 rounded-[2rem] shadow-xl border-2 border-white flex flex-col gap-6">
-              <div className="border-b border-gray-100 pb-4"><h3 className="text-lg font-black text-black uppercase tracking-tight">SLA Geral / Efficiency</h3></div>
-              <div className="flex flex-col md:flex-row items-center gap-8">
-                <div className="relative w-40 h-40 shrink-0">
-                  <ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={[{ value: Number(stats.efficiencyIndex) }, { value: 100 - Number(stats.efficiencyIndex) }]} innerRadius={50} outerRadius={70} startAngle={90} endAngle={450} dataKey="value" stroke="none"><RechartsCell fill={Number(stats.efficiencyIndex) > 85 ? '#059669' : (Number(stats.efficiencyIndex) > 60 ? '#d97706' : '#dc2626')} /><RechartsCell fill="#F1F5F9" /></Pie></PieChart></ResponsiveContainer>
-                  <div className="absolute inset-0 flex flex-col items-center justify-center text-center"><span className="text-3xl font-black text-black leading-none drop-shadow-md">{stats.efficiencyIndex}%</span><span className="text-[10px] font-black text-[#003DA5] uppercase mt-1">{stats.efficiencyLabel}</span></div>
+              <div className="border-b border-gray-100 pb-4 flex items-center justify-between">
+                <div>
+                  <h3 className="text-lg font-black text-black uppercase tracking-tight">Análise de Eficiência SLA</h3>
+                  <p className="text-[10px] font-black text-gray-600 uppercase tracking-widest">Base Histórica vs Filtrada</p>
                 </div>
-                <div className="flex-grow grid grid-cols-1 gap-3 w-full font-black uppercase text-[10px]">
-                  <div className="flex items-center justify-between p-3 bg-emerald-50 rounded-xl border-2 border-emerald-200"><span>No Prazo (≤ 5d)</span><span className="text-lg text-black drop-shadow-md">{stats.ctxNoPrazo} <span className="text-[9px] text-emerald-900 font-black">({stats.ctxNoPrazoPct}%)</span></span></div>
-                  <div className="flex items-center justify-between p-3 bg-amber-50 rounded-xl border-2 border-amber-200"><span>Alerta (6-9d)</span><span className="text-lg text-black drop-shadow-md">{stats.ctxAlerta} <span className="text-[9px] text-amber-950 font-black">({stats.ctxAlertaPct}%)</span></span></div>
-                  <div className="flex items-center justify-between p-3 bg-red-50 rounded-xl border-2 border-red-200"><span>Crítico (&gt;9d)</span><span className="text-lg text-black drop-shadow-md">{stats.ctxCritico} <span className="text-[9px] text-red-950 font-black">({stats.ctxCriticoPct}%)</span></span></div>
+                <Gauge className="w-6 h-6 text-blue-600" />
+              </div>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 divide-x-2 divide-gray-50">
+                {/* BLOCO GERAL (Base Histórica) */}
+                <div className="space-y-6">
+                   <div className="flex items-center gap-2 mb-2">
+                     <History className="w-4 h-4 text-gray-500" />
+                     <span className="text-[10px] font-black text-gray-700 uppercase tracking-widest">SLA Geral (Histórico)</span>
+                   </div>
+                   <div className="flex items-center gap-6">
+                     <div className="relative w-28 h-28 shrink-0">
+                       <ResponsiveContainer width="100%" height="100%">
+                         <PieChart>
+                           <Pie 
+                             data={[
+                               { value: Number(stats.generalRiskStatsPct.noPrazo) }, 
+                               { value: 100 - Number(stats.generalRiskStatsPct.noPrazo) }
+                             ]} 
+                             innerRadius={35} outerRadius={50} startAngle={90} endAngle={450} dataKey="value" stroke="none"
+                           >
+                             <RechartsCell fill="#059669" />
+                             <RechartsCell fill="#F1F5F9" />
+                           </Pie>
+                         </PieChart>
+                       </ResponsiveContainer>
+                       <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                         <span className="text-xl font-black text-black leading-none">{stats.generalRiskStatsPct.noPrazo}%</span>
+                         <span className="text-[7px] font-black text-emerald-700 uppercase mt-0.5">No Prazo</span>
+                       </div>
+                     </div>
+                     <div className="flex-grow space-y-2">
+                        <div className="flex items-center justify-between px-3 py-1.5 bg-emerald-50 rounded-lg border border-emerald-100">
+                          <span className="text-[9px] font-black text-emerald-800">No Prazo</span>
+                          <span className="text-xs font-black">{stats.generalRiskStats.noPrazo} <span className="opacity-75 ml-1">({stats.generalRiskStatsPct.noPrazo}%)</span></span>
+                        </div>
+                        <div className="flex items-center justify-between px-3 py-1.5 bg-amber-50 rounded-lg border border-amber-100">
+                          <span className="text-[9px] font-black text-amber-800">Alerta</span>
+                          <span className="text-xs font-black">{stats.generalRiskStats.alerta} <span className="opacity-75 ml-1">({stats.generalRiskStatsPct.alerta}%)</span></span>
+                        </div>
+                        <div className="flex items-center justify-between px-3 py-1.5 bg-red-50 rounded-lg border border-red-100">
+                          <span className="text-[9px] font-black text-red-800">Crítico</span>
+                          <span className="text-xs font-black">{stats.generalRiskStats.critico} <span className="opacity-75 ml-1">({stats.generalRiskStatsPct.critico}%)</span></span>
+                        </div>
+                     </div>
+                   </div>
+                </div>
+
+                {/* BLOCO FILTRADO (Base Filtrada) */}
+                <div className="space-y-6 pl-8">
+                   <div className="flex items-center gap-2 mb-2">
+                     <Filter className="w-4 h-4 text-blue-600" />
+                     <span className="text-[10px] font-black text-blue-600 uppercase tracking-widest">SLA Filtrado (Dinâmico)</span>
+                   </div>
+                   <div className="flex items-center gap-6">
+                     <div className="relative w-28 h-28 shrink-0">
+                       <ResponsiveContainer width="100%" height="100%">
+                         <PieChart>
+                           <Pie 
+                             data={[
+                               { value: Number(stats.ctxNoPrazoPct) }, 
+                               { value: 100 - Number(stats.ctxNoPrazoPct) }
+                             ]} 
+                             innerRadius={35} outerRadius={50} startAngle={90} endAngle={450} dataKey="value" stroke="none"
+                           >
+                             <RechartsCell fill="#003DA5" />
+                             <RechartsCell fill="#F1F5F9" />
+                           </Pie>
+                         </PieChart>
+                       </ResponsiveContainer>
+                       <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                         <span className="text-xl font-black text-black leading-none">{stats.ctxNoPrazoPct}%</span>
+                         <span className="text-[7px] font-black text-[#003DA5] uppercase mt-0.5">No Prazo</span>
+                       </div>
+                     </div>
+                     <div className="flex-grow space-y-2">
+                        <div className="flex items-center justify-between px-3 py-1.5 bg-blue-50 rounded-lg border border-blue-100">
+                          <span className="text-[9px] font-black text-blue-800">No Prazo</span>
+                          <span className="text-xs font-black">{stats.ctxNoPrazo} <span className="opacity-75 ml-1">({stats.ctxNoPrazoPct}%)</span></span>
+                        </div>
+                        <div className="flex items-center justify-between px-3 py-1.5 bg-gray-50 rounded-lg border border-gray-100">
+                          <span className="text-[9px] font-black text-amber-700">Alerta</span>
+                          <span className="text-xs font-black">{stats.ctxAlerta} <span className="opacity-75 ml-1">({stats.ctxAlertaPct}%)</span></span>
+                        </div>
+                        <div className="flex items-center justify-between px-3 py-1.5 bg-gray-50 rounded-lg border border-gray-100">
+                          <span className="text-[9px] font-black text-red-700">Crítico</span>
+                          <span className="text-xs font-black">{stats.ctxCritico} <span className="opacity-75 ml-1">({stats.ctxCriticoPct}%)</span></span>
+                        </div>
+                        <div className="mt-2 pt-2 border-t border-gray-100 flex items-center justify-between">
+                           <span className="text-[8px] font-black text-gray-600 uppercase">Eficiência Período</span>
+                           <span className={`text-[10px] font-black ${Number(stats.efficiencyIndex) > 85 ? 'text-emerald-600' : 'text-amber-600'}`}>
+                             {stats.efficiencyIndex}%
+                           </span>
+                        </div>
+                     </div>
+                   </div>
                 </div>
               </div>
             </div>
-            <div className="bg-[#003DA5] p-8 rounded-[2rem] text-white shadow-xl flex flex-col justify-between relative overflow-hidden group">
-              <div className="relative z-10"><ActivityIcon className="w-8 h-8 mb-4 opacity-80 group-hover:scale-110 transition-transform" /><h4 className="text-[10px] font-black uppercase tracking-widest text-blue-100">SLA Médio Geral</h4><p className="text-4xl font-black mt-2 drop-shadow-lg">{stats.avgSla} <span className="text-sm">dias</span></p></div>
-              <TrendingUpIcon className="absolute -right-4 -bottom-4 w-32 h-32 opacity-10 group-hover:rotate-12 transition-transform" />
+            <div className="bg-[#003DA5] p-7 rounded-[2rem] text-white shadow-xl flex flex-col relative overflow-hidden group">
+              <div className="relative z-10 flex flex-col h-full">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <ActivityIcon className="w-4 h-4 text-blue-200 opacity-70 group-hover:rotate-12 transition-transform" />
+                    <span className="text-[10px] font-black uppercase tracking-widest text-blue-100">SLA Médio / Conclusão</span>
+                  </div>
+                  {stats.slaComparisonTrend === 'BETTER' ? (
+                    <div className="flex items-center gap-1 bg-emerald-500/20 px-2 py-0.5 rounded-full text-emerald-300 border border-emerald-500/30">
+                      <TrendingDown className="w-3 h-3" />
+                      <span className="text-[9px] font-black">-{stats.slaDiffPercent}% vs média</span>
+                    </div>
+                  ) : stats.slaComparisonTrend === 'WORSE' ? (
+                    <div className="flex items-center gap-1 bg-red-500/20 px-2 py-0.5 rounded-full text-red-300 border border-red-500/30">
+                      <TrendingUp className="w-3 h-3" />
+                      <span className="text-[9px] font-black">+{stats.slaDiffPercent}% vs média</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1 bg-blue-400/20 px-2 py-0.5 rounded-full text-blue-200">
+                      <Minus className="w-3 h-3" />
+                      <span className="text-[9px] font-black uppercase tracking-widest">Estável</span>
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-4 space-y-4">
+                  <div className="flex flex-col">
+                    <span className="text-[8px] font-black uppercase tracking-widest text-blue-100 leading-none mb-1">Resultado Atual (Filtrado)</span>
+                    <div className="flex items-baseline gap-1">
+                      <span className="text-5xl font-black drop-shadow-xl tracking-tighter">{stats.avgSlaMonthly}</span>
+                      <span className="text-xs font-black text-blue-50 uppercase">dias</span>
+                    </div>
+                  </div>
+                  
+                  <div className="bg-white/10 border border-white/20 p-3 rounded-2xl flex items-center justify-between">
+                    <div className="flex flex-col">
+                      <span className="text-[7px] font-black uppercase text-blue-100">SLA Médio Geral</span>
+                      <span className="text-sm font-black text-white">{stats.avgSla} dias</span>
+                    </div>
+                    <div className="w-px h-6 bg-white/20" />
+                    <div className="text-right">
+                      <span className="text-[7px] font-black uppercase text-blue-100">Tendência</span>
+                      <p className="text-[10px] font-black flex items-center justify-end gap-1">
+                        {stats.slaComparisonTrend === 'BETTER' ? 'POSITIVA' : stats.slaComparisonTrend === 'WORSE' ? 'ATENÇÃO' : 'NEUTRA'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                
+                {/* Real Trend Graph (Area Chart) */}
+                <div className="h-16 w-full mt-auto relative pt-4">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={stats.cycleTimeData.slice(-12)}>
+                      <defs>
+                        <linearGradient id="whiteArea" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#fff" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#fff" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <Area type="monotone" dataKey="avgConclusion" stroke="#fff" strokeWidth={2} fill="url(#whiteArea)" isAnimationActive={true} />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                  <div className="absolute bottom-0 left-0 right-0 flex justify-between px-1 opacity-50">
+                    <span className="text-[8px] font-black uppercase">Variação Temporal SLA</span>
+                    <span className="text-[8px] font-black uppercase italic">Real-time</span>
+                  </div>
+                </div>
+              </div>
+              <ActivityIcon className="absolute -right-4 -bottom-4 w-24 h-24 opacity-5 group-hover:rotate-12 transition-transform" />
             </div>
-            <div className="bg-white p-8 rounded-[2rem] shadow-xl border-2 border-white flex flex-col justify-between">
-              <div className="space-y-6">
-                <div className="flex justify-between border-b pb-4"><div className="flex flex-col"><span className="text-[10px] font-black text-red-900 uppercase">Máximo Espera</span><span className="text-2xl font-black text-black drop-shadow-sm">{stats.maxSlaDays}d</span></div><TimerIcon className="w-6 h-6 text-red-700" /></div>
-                <div className="flex justify-between"><div className="flex flex-col"><span className="text-[10px] font-black text-emerald-900 uppercase">Maior Agilidade</span><span className="text-2xl font-black text-black drop-shadow-sm">{stats.minSlaFinal}d</span></div><ZapIcon className="w-6 h-6 text-emerald-700 animate-pulse" /></div>
+            <div className="bg-white p-7 rounded-[2rem] shadow-xl border-2 border-white flex flex-col justify-between">
+              <div className="h-full flex flex-col">
+                <div className="flex items-center justify-between border-b border-gray-100 pb-3 mb-4">
+                   <span className="text-[10px] font-black text-gray-600 uppercase tracking-widest leading-none">Extremos SLA / Eficiência</span>
+                   <ZapIcon className="w-4 h-4 text-amber-500" />
+                </div>
+                
+                <div className="grid grid-cols-1 gap-4 flex-grow">
+                  {/* MÁXIMO COMPARATIVO */}
+                  <div className="bg-red-50/60 p-4 rounded-2xl border border-red-100 flex flex-col justify-center">
+                    <div className="flex items-center justify-between mb-3">
+                       <div className="flex items-center gap-2">
+                          <TimerIcon className="w-3 h-3 text-red-600" />
+                          <span className="text-[9px] font-black text-red-900 uppercase tracking-widest">Máximo Espera (Cases)</span>
+                       </div>
+                    </div>
+                    
+                    <div className="flex items-end justify-between gap-4">
+                      <div className="flex flex-col">
+                        <span className="text-[8px] font-black text-red-600 uppercase mb-0.5">Dinâmico / Filtro</span>
+                        <div className="flex items-baseline gap-1">
+                          <span className="text-3xl font-black text-red-900 leading-none">{stats.filteredRiskStats.maxSla}</span>
+                          <span className="text-[10px] font-black text-red-950/70 uppercase">dias</span>
+                        </div>
+                      </div>
+                      <div className="flex flex-col text-right">
+                        <span className="text-[8px] font-black text-gray-600 uppercase mb-0.5">Geral Histórico</span>
+                        <span className="text-lg font-black text-gray-500 leading-none">{stats.generalRiskStats.maxSla}d</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* MÍNIMO COMPARATIVO */}
+                  <div className="bg-emerald-50/60 p-4 rounded-2xl border border-emerald-100 flex flex-col justify-center">
+                    <div className="flex items-center justify-between mb-3">
+                       <div className="flex items-center gap-2">
+                          <ZapIcon className="w-3 h-3 text-emerald-600" />
+                          <span className="text-[9px] font-black text-emerald-900 uppercase tracking-widest">Maior Agilidade (Min)</span>
+                       </div>
+                    </div>
+                    
+                    <div className="flex items-end justify-between gap-4">
+                      <div className="flex flex-col">
+                        <span className="text-[8px] font-black text-emerald-600 uppercase mb-0.5">Dinâmico / Filtro</span>
+                        <div className="flex items-baseline gap-1">
+                          <span className="text-3xl font-black text-emerald-900 leading-none">{stats.filteredRiskStats.minSla === Infinity ? 0 : stats.filteredRiskStats.minSla}</span>
+                          <span className="text-[10px] font-black text-emerald-950/70 uppercase">dias</span>
+                        </div>
+                      </div>
+                      <div className="flex flex-col text-right">
+                        <span className="text-[8px] font-black text-gray-600 uppercase mb-0.5">Geral Histórico</span>
+                        <span className="text-lg font-black text-gray-500 leading-none">{stats.generalRiskStats.minSla === Infinity ? 0 : stats.generalRiskStats.minSla}d</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -1132,13 +1423,19 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
             <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-10 gap-6">
               <div>
                 <h3 className="text-2xl font-black uppercase tracking-tighter text-[#003DA5]">Velocidade de Resposta / Atendimento</h3>
-                <div className="flex flex-col gap-1 mt-2">
-                  <div className="text-[10px] font-black text-gray-500 uppercase tracking-widest flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-[#D91B2A]" />
-                    Tempo até Conclusão: Data Retorno – Data Abertura
+                <div className="flex flex-col gap-2 mt-3">
+                  <div className="flex items-center gap-4">
+                    <div className="text-[10px] font-black text-gray-700 uppercase tracking-widest flex items-center gap-2">
+                      <div className="w-2.5 h-2.5 rounded-full bg-[#003DA5]" />
+                      SLA Realizado (Médio)
+                    </div>
+                    <div className="text-[10px] font-black text-emerald-600 uppercase tracking-widest flex items-center gap-2">
+                      <div className="w-3 h-1 bg-emerald-500 rounded-full" />
+                      Meta SLA (≤ 5 dias)
+                    </div>
                   </div>
                   <div className="text-[10px] font-black text-amber-600 uppercase tracking-widest flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-amber-500" />
+                    <div className="w-2.5 h-2.5 rounded-full bg-amber-500" />
                     Backlog: Casos em aberto (Tempo Médio)
                   </div>
                 </div>
@@ -1175,6 +1472,11 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                       if (data && data.activeLabel) {
                         const label = String(data.activeLabel);
                         setSelectedCycleMonth(selectedCycleMonth === label ? null : label);
+                        
+                        // Smooth scroll to details
+                        setTimeout(() => {
+                          detailsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }, 100);
                       }
                     }}
                   >
@@ -1189,13 +1491,13 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                       dataKey="month" 
                       axisLine={false} 
                       tickLine={false} 
-                      tick={{ fontSize: 10, fontWeight: 900, fill: '#64748b' }} 
+                      tick={{ fontSize: 10, fontWeight: 900, fill: '#475569' }} 
                       dy={10}
                     />
                     <YAxis 
                       axisLine={false} 
                       tickLine={false} 
-                      tick={{ fontSize: 10, fontWeight: 900, fill: '#64748b' }} 
+                      tick={{ fontSize: 10, fontWeight: 900, fill: '#475569' }} 
                     />
                     <Tooltip 
                       content={(props: any) => {
@@ -1235,13 +1537,6 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                       stroke={FSJ_COLORS.emerald} 
                       strokeDasharray="5 5" 
                       strokeWidth={2}
-                      label={{ 
-                        position: 'insideLeft', 
-                        value: 'META SLA (≤5d)', 
-                        fill: FSJ_COLORS.emerald, 
-                        fontSize: 9, 
-                        fontWeight: 900 
-                      }} 
                     />
                     <Area 
                       type="monotone" 
@@ -1280,24 +1575,83 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
             </div>
 
             {/* QUADRO DE IDENTIFICAÇÃO DE CASES CRÍTICOS */}
-            <div className="mt-12 border-t pt-10">
-              <div className="flex items-center justify-between mb-8">
-                <div>
-                  <h4 className="text-xl font-black uppercase tracking-tighter text-gray-900">
-                    {selectedCycleMonth ? `Casos Críticos de ${selectedCycleMonth}` : 'Top 5 Casos Críticos do Período'}
-                  </h4>
-                  <p className="text-[10px] font-black text-gray-500 uppercase tracking-widest mt-1">
-                    Ordenado por maior tempo de conclusão
-                  </p>
+            <div className="mt-12 border-t pt-10" ref={detailsRef}>
+              <div className="flex flex-col mb-8">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-xl font-black uppercase tracking-tighter text-gray-900">
+                      {selectedCycleMonth ? `Detalhamento: ${selectedCycleMonth}` : 'Top 5 Casos Críticos do Período'}
+                    </h4>
+                    <p className="text-[10px] font-black text-gray-700 uppercase tracking-widest mt-1">
+                      {selectedCycleMonth ? 'Análise granular do período selecionado' : 'Ordenado por maior tempo de conclusão'}
+                    </p>
+                  </div>
+                  {selectedCycleMonth && (
+                    <button 
+                      onClick={() => setSelectedCycleMonth(null)}
+                      className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-[10px] font-black uppercase transition-all flex items-center gap-2"
+                    >
+                      <RotateCcwIcon className="w-3 h-3" /> Limpar Seleção
+                    </button>
+                  )}
                 </div>
-                {selectedCycleMonth && (
-                  <button 
-                    onClick={() => setSelectedCycleMonth(null)}
-                    className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-[10px] font-black uppercase transition-all"
-                  >
-                    Limpar Seleção
-                  </button>
-                )}
+
+                {selectedCycleMonth && (() => {
+                  const monthData = stats.cycleTimeData.find(d => d.month === selectedCycleMonth);
+                  if (!monthData) return null;
+                  
+                  const records = monthData.records || [];
+                  const total = records.length;
+                  const avgSla = parseFloat(monthData.avgConclusion);
+                  
+                  const critico = records.filter(r => {
+                    const od = robustDateParse(r.openingDate);
+                    const rd = robustDateParse(r.returnDate);
+                    const cd = robustDateParse(r.conclusionDate);
+                    const start = od ? startOfDay(od) : today;
+                    const conc = rd ? startOfDay(rd) : (cd ? startOfDay(cd) : today);
+                    return Math.abs(differenceInDays(conc, start)) > 9;
+                  }).length;
+
+                  const alerta = records.filter(r => {
+                    const od = robustDateParse(r.openingDate);
+                    const rd = robustDateParse(r.returnDate);
+                    const cd = robustDateParse(r.conclusionDate);
+                    const start = od ? startOfDay(od) : today;
+                    const conc = rd ? startOfDay(rd) : (cd ? startOfDay(cd) : today);
+                    const diff = Math.abs(differenceInDays(conc, start));
+                    return diff > 5 && diff <= 9;
+                  }).length;
+
+                  const devolvidos = records.filter(r => normalizeStatusStrict(r.status) === 'DEVOLVIDO').length;
+
+                  return (
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mt-6 animate-in slide-in-from-top-4 duration-300">
+                      <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                        <span className="text-[8px] font-black text-gray-400 uppercase tracking-widest block mb-1">SLA Médio</span>
+                        <p className={`text-xl font-black ${avgSla <= 5 ? 'text-emerald-600' : (avgSla <= 9 ? 'text-amber-600' : 'text-red-600')}`}>
+                          {avgSla}d
+                        </p>
+                      </div>
+                      <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                        <span className="text-[8px] font-black text-gray-400 uppercase tracking-widest block mb-1">Total de Cases</span>
+                        <p className="text-xl font-black text-gray-900">{total}</p>
+                      </div>
+                      <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                        <span className="text-[8px] font-black text-red-400 uppercase tracking-widest block mb-1">Críticos</span>
+                        <p className="text-xl font-black text-red-600">{critico}</p>
+                      </div>
+                      <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                        <span className="text-[8px] font-black text-amber-500 uppercase tracking-widest block mb-1">Alerta</span>
+                        <p className="text-xl font-black text-amber-600">{alerta}</p>
+                      </div>
+                      <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                        <span className="text-[8px] font-black text-orange-400 uppercase tracking-widest block mb-1">Devolvidos</span>
+                        <p className="text-xl font-black text-orange-600">{devolvidos}</p>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="overflow-x-auto rounded-3xl border-2 border-gray-100 shadow-sm">
@@ -1382,56 +1736,91 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
       {/* DASHBOARD RISCO OPERACIONAL */}
       {activeTab === 'risk' && (
         <div className="space-y-10 animate-in slide-in-from-right-10 duration-500">
-           <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-              <div 
-                onClick={() => onFilterAction('sla', 'NO PRAZO')}
-                className="bg-emerald-600 p-10 rounded-[2.5rem] shadow-xl text-white relative overflow-hidden cursor-pointer group hover:scale-[1.02] transition-all"
-              >
-                 <div className="flex justify-between items-start relative z-10">
-                    <div>
-                        <p className="text-[10px] font-black uppercase mb-2 opacity-80 tracking-widest">Conformidade (≤5d)</p>
-                        <p className="text-4xl font-black">{stats.ctxNoPrazo} <span className="text-xl font-bold opacity-70">({stats.ctxNoPrazoPct}%)</span></p>
+           <div className="flex items-center justify-between bg-white p-8 rounded-[2rem] shadow-sm border border-gray-100">
+              <div>
+                <h3 className="text-2xl font-black uppercase tracking-tighter text-gray-900 flex items-center gap-3">
+                  <Gauge className="w-8 h-8 text-blue-600" /> SLA GERAL vs PERFORMANCE MENSAL
+                </h3>
+                <p className="text-[10px] font-black text-gray-600 uppercase tracking-widest mt-1">Comparativo de performance entre a base histórica e o período atual</p>
+              </div>
+              <div className="px-5 py-2 bg-blue-50 rounded-2xl border border-blue-100 text-blue-700 flex items-center gap-3">
+                <Calendar className="w-5 h-5 opacity-60" />
+                <span className="text-[11px] font-black uppercase">{stats.periodRef}</span>
+              </div>
+           </div>
+
+           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              {/* COLUNA GERAL (Baseline) */}
+              <div className="space-y-6">
+                <div className="flex items-center gap-3 mb-2 px-4">
+                  <div className="w-3 h-3 rounded-full bg-gray-500" />
+                  <h4 className="text-sm font-black uppercase tracking-widest text-gray-700">Benchmark Geral (Base Histórica)</h4>
+                </div>
+                <div className="grid grid-cols-1 gap-4">
+                  {[
+                    { label: 'No Prazo (≤5d)', count: stats.generalRiskStats.noPrazo, pct: stats.generalRiskStatsPct.noPrazo, color: 'bg-emerald-50 text-emerald-700 border-emerald-100', icon: <CheckCircle2 className="w-5 h-5" /> },
+                    { label: 'Alerta (6-9d)', count: stats.generalRiskStats.alerta, pct: stats.generalRiskStatsPct.alerta, color: 'bg-amber-50 text-amber-700 border-amber-100', icon: <AlertTriangle className="w-5 h-5" /> },
+                    { label: 'Crítico (>9d)', count: stats.generalRiskStats.critico, pct: stats.generalRiskStatsPct.critico, color: 'bg-red-50 text-red-700 border-red-100', icon: <ShieldAlertIcon className="w-5 h-5" /> }
+                  ].map((item, i) => (
+                    <div key={i} className={`p-6 rounded-[2rem] border shadow-sm flex items-center justify-between ${item.color}`}>
+                      <div className="flex items-center gap-4">
+                        <div className="p-3 bg-white/50 rounded-xl">{item.icon}</div>
+                        <div>
+                          <p className="text-[10px] font-black uppercase opacity-60">{item.label}</p>
+                          <p className="text-3xl font-black">{item.count}</p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[10px] font-black uppercase opacity-40">Share</p>
+                        <p className="text-xl font-black opacity-80">{item.pct}%</p>
+                      </div>
                     </div>
-                    <div className="flex flex-col items-end">
-                        <TrendIcon trend={stats.riskTrends.noPrazo as "UP" | "DOWN" | "STABLE"} />
-                        <span className="text-[9px] font-black uppercase opacity-60 mt-1">Ref: {stats.periodRef}</span>
-                    </div>
-                 </div>
-                 <CheckCircle2 className="absolute -right-4 -bottom-4 w-32 h-32 opacity-10 group-hover:scale-110 transition-all" />
+                  ))}
+                </div>
               </div>
 
-              <div 
-                onClick={() => onFilterAction('sla', 'ALERTA')}
-                className="bg-amber-600 p-10 rounded-[2.5rem] shadow-xl text-white relative overflow-hidden cursor-pointer group hover:scale-[1.02] transition-all"
-              >
-                 <div className="flex justify-between items-start relative z-10">
-                    <div>
-                        <p className="text-[10px] font-black uppercase mb-2 opacity-80 tracking-widest">Alerta (6-9d)</p>
-                        <p className="text-4xl font-black">{stats.ctxAlerta} <span className="text-xl font-bold opacity-70">({stats.ctxAlertaPct}%)</span></p>
-                    </div>
-                    <div className="flex flex-col items-end">
-                        <TrendIcon trend={stats.riskTrends.alerta as "UP" | "DOWN" | "STABLE"} />
-                        <span className="text-[9px] font-black uppercase opacity-60 mt-1">Ref: {stats.periodRef}</span>
-                    </div>
-                 </div>
-                 <AlertTriangle className="absolute -right-4 -bottom-4 w-32 h-32 opacity-10 group-hover:scale-110 transition-all" />
-              </div>
-
-              <div 
-                onClick={() => onFilterAction('sla', 'CRÍTICO')}
-                className="bg-red-600 p-10 rounded-[2.5rem] shadow-xl text-white relative overflow-hidden cursor-pointer group hover:scale-[1.02] transition-all"
-              >
-                 <div className="flex justify-between items-start relative z-10">
-                    <div>
-                        <p className="text-[10px] font-black uppercase mb-2 opacity-80 tracking-widest">Crítico (&gt;9d)</p>
-                        <p className="text-4xl font-black">{stats.ctxCritico} <span className="text-xl font-bold opacity-70">({stats.ctxCriticoPct}%)</span></p>
-                    </div>
-                    <div className="flex flex-col items-end">
-                        <TrendIcon trend={stats.riskTrends.critico as "UP" | "DOWN" | "STABLE"} />
-                        <span className="text-[9px] font-black uppercase opacity-60 mt-1">Ref: {stats.periodRef}</span>
-                    </div>
-                 </div>
-                 <ShieldAlertIcon className="absolute -right-4 -bottom-4 w-32 h-32 opacity-10 group-hover:scale-110 transition-all" />
+              {/* COLUNA PERÍODO (Performance Atual) */}
+              <div className="space-y-6">
+                <div className="flex items-center gap-3 mb-2 px-4">
+                  <div className="w-3 h-3 rounded-full bg-blue-600 animate-pulse" />
+                  <h4 className="text-sm font-black uppercase tracking-widest text-blue-600">Performance Período Selecionado</h4>
+                </div>
+                <div className="grid grid-cols-1 gap-4">
+                  {[
+                    { key: 'noPrazo', label: 'No Prazo (≤5d)', count: stats.ctxNoPrazo, pct: stats.ctxNoPrazoPct, generalPct: stats.generalRiskStatsPct.noPrazo, color: 'bg-emerald-600 text-white', icon: <CheckCircle2 className="w-6 h-6" />, reverseTrend: true },
+                    { key: 'alerta', label: 'Alerta (6-9d)', count: stats.ctxAlerta, pct: stats.ctxAlertaPct, generalPct: stats.generalRiskStatsPct.alerta, color: 'bg-amber-600 text-white', icon: <AlertTriangle className="w-6 h-6" /> },
+                    { key: 'critico', label: 'Crítico (>9d)', count: stats.ctxCritico, pct: stats.ctxCriticoPct, generalPct: stats.generalRiskStatsPct.critico, color: 'bg-red-600 text-white', icon: <ShieldAlertIcon className="w-6 h-6" /> }
+                  ].map((item, i) => {
+                    const diff = Number(item.pct) - Number(item.generalPct);
+                    const isPositive = diff > 0;
+                    const isBetter = item.reverseTrend ? isPositive : !isPositive;
+                    
+                    return (
+                      <div key={i} className={`p-6 rounded-[2rem] shadow-xl relative overflow-hidden group hover:scale-[1.02] transition-all cursor-pointer ${item.color}`} onClick={() => onFilterAction('sla', item.label.split(' ')[0].toUpperCase())}>
+                        <div className="flex items-center justify-between relative z-10">
+                          <div className="flex items-center gap-5">
+                            <div className="p-4 bg-white/20 rounded-2xl backdrop-blur-sm">{item.icon}</div>
+                            <div>
+                              <p className="text-[10px] font-black uppercase opacity-70 tracking-widest">{item.label}</p>
+                              <p className="text-4xl font-black">{item.count} <span className="text-xl opacity-60">({item.pct}%)</span></p>
+                            </div>
+                          </div>
+                          
+                          <div className="text-right flex flex-col items-end">
+                            <TrendIcon trend={(stats.riskTrends as any)[item.key]} />
+                            <div className={`mt-2 flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black border ${Math.abs(diff) === 0 ? 'bg-white/10 border-white/20' : (isBetter ? 'bg-emerald-400 text-emerald-950 border-emerald-300' : 'bg-red-400 text-red-950 border-red-300')}`}>
+                              {diff !== 0 && (isBetter ? <TrendingDown className="w-3 h-3" /> : <TrendingUp className="w-3 h-3" />)}
+                              {diff > 0 ? `+${diff}` : (diff < 0 ? diff : 'ESTÁVEL')}% vs Geral
+                            </div>
+                          </div>
+                        </div>
+                        <div className="absolute -right-4 -bottom-4 w-32 h-32 opacity-10 group-hover:scale-110 transition-all pointer-events-none">
+                           {item.icon}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
            </div>
         </div>
@@ -1447,7 +1836,7 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                   <div className={`p-3 rounded-xl mb-4 transition-colors ${Number(stats.rftIndex) >= 98 ? 'bg-emerald-50 text-emerald-600 group-hover:bg-emerald-100' : 'bg-red-50 text-red-600 group-hover:bg-red-100'}`}>
                     <Target className="w-6 h-6" />
                   </div>
-                  <h4 className="text-[14px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Qualidade (RFT)</h4>
+                  <h4 className="text-[14px] font-black text-gray-700 uppercase tracking-wide mb-1">Qualidade (RFT)</h4>
                   <div className="flex items-baseline gap-2">
                     <span className={`text-[32px] font-bold ${Number(stats.rftIndex) >= 98 ? 'text-emerald-700' : 'text-red-700'}`}>{stats.rftIndex}%</span>
                     <TrendIcon trend={stats.rftTrend as "UP" | "DOWN" | "STABLE"} />
@@ -1456,14 +1845,14 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                     <div className={`w-1.5 h-1.5 rounded-full ${Number(stats.rftIndex) >= 98 ? 'bg-emerald-500' : 'bg-red-500'}`} />
                     {Number(stats.rftIndex) >= 98 ? 'Acima da Meta' : 'Abaixo da Meta'}
                   </div>
-                  <p className="text-[11px] font-medium text-gray-400 mt-2 italic">Meta de qualidade (RFT): ≥ 98%</p>
+                  <p className="text-[11px] font-medium text-gray-600 mt-2 italic">Meta de qualidade (RFT): ≥ 98%</p>
               </div>
 
               <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-gray-100 flex flex-col items-center justify-center text-center group hover:shadow-md transition-all">
                   <div className="p-3 bg-indigo-50 rounded-xl mb-4 group-hover:bg-indigo-100 transition-colors">
                     <CheckCircle2 className="w-6 h-6 text-indigo-600" />
                   </div>
-                  <h4 className="text-[14px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Qualidade Total</h4>
+                  <h4 className="text-[14px] font-black text-gray-700 uppercase tracking-wide mb-1">Qualidade Total</h4>
                   <span className="text-[32px] font-bold text-[#111827]">
                     {((stats.totalConcluidos / (stats.validRecordsCount || 1)) * 100).toFixed(1)}%
                   </span>
@@ -1477,7 +1866,7 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                   <div className="p-3 bg-orange-50 rounded-xl mb-4 group-hover:bg-orange-100 transition-colors">
                     <RotateCcwIcon className="w-6 h-6 text-orange-600" />
                   </div>
-                  <h4 className="text-[14px] font-semibold text-gray-500 uppercase tracking-wide mb-1">Retrabalho</h4>
+                  <h4 className="text-[14px] font-black text-gray-700 uppercase tracking-wide mb-1">Retrabalho</h4>
                   <span className="text-[32px] font-bold text-[#111827]">{stats.totalRetrabalho}</span>
                   <p className="text-[12px] font-medium text-orange-600 uppercase mt-2">Volume Bruto</p>
               </div>
@@ -1502,10 +1891,10 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                 RFT (Resolução na primeira interação): {stats.rftIndex}% | Retrabalho: {stats.reworkRate.toFixed(1)}%
               </p>
               <div className="flex items-center justify-between mt-3">
-                <p className="text-[11px] font-medium text-gray-400 uppercase tracking-wider italic">{stats.periodRef}</p>
+                <p className="text-[11px] font-black text-gray-600 uppercase tracking-wider italic">{stats.periodRef}</p>
                 <div className="flex items-center gap-2 px-3 py-1 bg-white/5 rounded-lg border border-white/10">
                   <Filter className="w-3 h-3 text-gray-500" />
-                  <span className="text-[11px] font-bold text-gray-400 uppercase tracking-widest">Base Filtrada</span>
+                  <span className="text-[11px] font-black text-gray-600 uppercase tracking-widest">Base Filtrada</span>
                 </div>
               </div>
             </div>
@@ -1584,7 +1973,7 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                     </div>
                     <div>
                       <h3 className="text-[16px] font-bold text-[#111827] uppercase tracking-tight leading-none">Funil Operacional</h3>
-                      <p className="text-[11px] font-medium text-gray-400 uppercase mt-1">Status de Fluxo</p>
+                      <p className="text-[11px] font-black text-gray-600 uppercase mt-1">Status de Fluxo</p>
                     </div>
                   </div>
                   
@@ -1596,12 +1985,12 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                             <div key={idx} className="space-y-2 group">
                                 <div className="flex justify-between items-end">
                                     <div className="flex flex-col">
-                                        <span className="text-[11px] font-bold uppercase text-gray-400 leading-none mb-1">{item.step}</span>
+                                        <span className="text-[11px] font-black uppercase text-gray-600 leading-none mb-1">{item.step}</span>
                                         <span className="text-[15px] font-bold text-[#111827] uppercase tracking-tight">{item.label}</span>
                                     </div>
                                     <div className="text-right">
                                         <span className="text-[28px] font-bold block leading-none text-[#111827] mb-1">{item.value}</span>
-                                        <span className="text-[11px] font-bold text-gray-400">{percent.toFixed(1)}%</span>
+                                        <span className="text-[11px] font-black text-gray-600">{percent.toFixed(1)}%</span>
                                     </div>
                                 </div>
                                 <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
@@ -1623,7 +2012,7 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                     </div>
                     <div>
                       <h3 className="text-[16px] font-bold text-[#111827] uppercase tracking-tight leading-none">Funil de Qualidade</h3>
-                      <p className="text-[11px] font-medium text-gray-400 uppercase mt-1">Conformidade RFT</p>
+                      <p className="text-[11px] font-black text-gray-600 uppercase mt-1">Conformidade RFT</p>
                     </div>
                   </div>
                   
@@ -1641,15 +2030,15 @@ const Dashboard: React.FC<DashboardProps> = ({ records, contextRecords, onLocate
                             >
                                 <div className="flex justify-between items-end">
                                     <div className="flex flex-col">
-                                        <span className="text-[11px] font-bold uppercase text-gray-400 leading-none mb-1">{item.step}</span>
+                                        <span className="text-[11px] font-black uppercase text-gray-600 leading-none mb-1">{item.step}</span>
                                         <span className="text-[15px] font-bold text-[#111827] uppercase tracking-tight flex items-center gap-2">
                                           {item.label}
-                                          {isRework && <ExternalLink className="w-3 h-3 text-gray-300 group-hover:text-amber-500" />}
+                                          {isRework && <ExternalLink className="w-3 h-3 text-gray-400 group-hover:text-amber-500" />}
                                         </span>
                                     </div>
                                     <div className="text-right">
                                         <span className="text-[28px] font-bold block leading-none text-[#111827] mb-1">{item.value}</span>
-                                        <span className="text-[11px] font-bold text-gray-400">{percent.toFixed(1)}%</span>
+                                        <span className="text-[11px] font-black text-gray-600">{percent.toFixed(1)}%</span>
                                     </div>
                                 </div>
                                 <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
